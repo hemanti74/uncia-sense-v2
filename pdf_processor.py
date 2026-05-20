@@ -158,9 +158,7 @@ def _extract_pdf(
 ) -> ExtractedDocument:
     import fitz  # PyMuPDF
 
-    def _p(msg: str) -> None:
-        if progress_cb:
-            progress_cb(msg)
+    _p = progress_cb or (lambda _msg: None)
 
     warnings: list[str] = []
     pages_md: list[str] = []
@@ -199,14 +197,14 @@ def _extract_pdf(
                 any_scan = True
                 if not _resolve_tesseract():
                     warnings.append(
-                        f"Page {idx + 1}: Tesseract not installed; OCR skipped. "
+                        f"Page {idx + 1}: OCR unavailable; skipped. "
                         "Attaching original PDF as vision fallback."
                     )
                     page_md_parts.append("_(scanned content; OCR unavailable — see attached original)_")
                     page_conf = 0.0
                     page_quality = "LOW"
                 else:
-                    _p(f"  page {idx + 1}/{page_count}: Tesseract OCR running ({OCR_LANGUAGES})…")
+                    _p(f"  page {idx + 1}/{page_count}: OCR running ({OCR_LANGUAGES})…")
                     any_ocr = True
                     ocr_page_count += 1
                     img = _render_page(page, dpi=OCR_DPI)
@@ -252,7 +250,7 @@ def _extract_pdf(
 
     markdown = _assemble_markdown(filename, metadata, body)
     ocr_summary = (
-        f"Tesseract OCR'd {ocr_page_count}/{page_count} page(s)"
+        f"OCR'd {ocr_page_count}/{page_count} page(s)"
         if any_ocr
         else f"no OCR needed ({page_count} page(s) born-digital)"
     )
@@ -286,9 +284,7 @@ def _extract_image(
 ) -> ExtractedDocument:
     from PIL import Image
 
-    def _p(msg: str) -> None:
-        if progress_cb:
-            progress_cb(msg)
+    _p = progress_cb or (lambda _msg: None)
 
     warnings: list[str] = []
     media = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
@@ -302,7 +298,7 @@ def _extract_image(
 
     ocr_ran = False
     if _resolve_tesseract():
-        _p(f"  Tesseract OCR running ({OCR_LANGUAGES})…")
+        _p(f"  OCR running ({OCR_LANGUAGES})…")
         img, applied_rotation = _autorotate_image(img)
         ocr_text, ocr_conf = _ocr_image(img)
         ocr_quality = _classify_ocr_quality(ocr_conf)
@@ -312,7 +308,7 @@ def _extract_image(
             skewed = True
     else:
         warnings.append(
-            "Tesseract not installed; OCR skipped. Attaching original image as vision fallback."
+            "OCR unavailable; skipped. Attaching original image as vision fallback."
         )
 
     languages = _detect_languages(ocr_text) if ocr_text.strip() else []
@@ -348,9 +344,9 @@ def _extract_image(
 
     markdown = _assemble_markdown(filename, metadata, "\n\n".join(body_lines))
     if ocr_ran:
-        _p(f"  Tesseract OCR'd image · confidence={confidence:.2f} quality={ocr_quality}")
+        _p(f"  OCR'd image · confidence={confidence:.2f} quality={ocr_quality}")
     else:
-        _p("  no OCR (Tesseract unavailable) · attaching original as fallback")
+        _p("  no OCR available · attaching original as fallback")
 
     return ExtractedDocument(
         filename=filename,

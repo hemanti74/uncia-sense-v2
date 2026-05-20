@@ -44,7 +44,7 @@ def build_content_blocks(
             doc = extract_document(filename, file_bytes, progress_cb=progress_cb)
         except Exception as e:
             if progress_cb:
-                progress_cb(f"  preprocessing failed ({e}); sending original to Claude")
+                progress_cb(f"  preprocessing failed ({e}); sending original to the model")
             return [_legacy_block(filename, file_bytes, ext)], None
 
         for w in doc.warnings:
@@ -76,11 +76,3 @@ def _legacy_block(filename: str, file_bytes: bytes, ext: str) -> dict:
         "type": "image",
         "source": {"type": "base64", "media_type": media, "data": data},
     }
-
-
-def build_content_block(filename: str, file_bytes: bytes) -> dict:
-    """Backwards-compatible single-block helper (no preprocessing). Returns
-    the first block from build_content_blocks for callers that still expect a
-    single dict (e.g. tests, ad-hoc scripts)."""
-    blocks, _ = build_content_blocks(filename, file_bytes, preprocess=False)
-    return blocks[0]

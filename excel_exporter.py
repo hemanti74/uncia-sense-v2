@@ -9,6 +9,26 @@ FACTORSQL_COLUMNS = [
     "DUE_DATE", "INV_DATE", "INV_ID", "PO_NO", "REL_ID",
 ]
 
+# OWASP CSV-injection mitigation: cells starting with these characters are
+# interpreted as formulas by Excel/Sheets, allowing arbitrary code execution
+# (e.g. =cmd|'/c calc'!A1). Prefix with a single quote so they render as text.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _safe_cell(value):
+    """Neutralize formula-injection vectors in string cells; pass others through."""
+    if not isinstance(value, str) or not value:
+        return value
+    return "'" + value if value[0] in _FORMULA_PREFIXES else value
+
+
+def _safe_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply _safe_cell to every object-dtype column to neutralize CSV/Excel injection."""
+    for col in df.columns:
+        if df[col].dtype == "object":
+            df[col] = df[col].map(_safe_cell)
+    return df
+
 
 def _bal_assign(value) -> str:
     if value is None or value == "":
@@ -48,15 +68,15 @@ def generate_factorsql_csv(report: dict) -> bytes:
             balance = inv.get("total_amount")
 
         writer.writerow([
-            "",                                          # ACCT_ID
-            "",                                          # ACCT_SUB
-            _bal_assign(balance),                        # BAL_ASSIGN (amount_due)
-            buyer.get("name") or "",                      # DTR_NAME
-            inv.get("due_date") or "",                    # DUE_DATE
-            inv.get("invoice_date") or "",                # INV_DATE
-            inv.get("invoice_number") or "",              # INV_ID
-            inv.get("po_reference") or "",                # PO_NO
-            "",                                          # REL_ID
+            "",                                                   # ACCT_ID
+            "",                                                   # ACCT_SUB
+            _bal_assign(balance),                                 # BAL_ASSIGN (amount_due)
+            _safe_cell(buyer.get("name") or ""),                  # DTR_NAME
+            _safe_cell(inv.get("due_date") or ""),                # DUE_DATE
+            _safe_cell(inv.get("invoice_date") or ""),            # INV_DATE
+            _safe_cell(inv.get("invoice_number") or ""),          # INV_ID
+            _safe_cell(inv.get("po_reference") or ""),            # PO_NO
+            "",                                                   # REL_ID
         ])
 
     return ("﻿" + buf.getvalue()).encode("utf-8")
@@ -234,6 +254,16 @@ def generate_excel(report: dict) -> bytes:
     df_unassigned = pd.DataFrame(unassigned_rows) if unassigned_rows else pd.DataFrame(
         columns=["Filename", "Reason"]
     )
+
+    # Neutralize CSV/Excel formula-injection before writing.
+    df_summary = _safe_df(df_summary)
+    df_documents = _safe_df(df_documents)
+    df_packages = _safe_df(df_packages)
+    df_discrepancies = _safe_df(df_discrepancies)
+    df_flags = _safe_df(df_flags)
+    df_matrix = _safe_df(df_matrix)
+    df_missing = _safe_df(df_missing)
+    df_unassigned = _safe_df(df_unassigned)
 
     # ── Write workbook ─────────────────────────────────────────────────────────
     buf = io.BytesIO()

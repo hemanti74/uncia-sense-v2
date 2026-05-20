@@ -1,18 +1,20 @@
 import json
+import re
 import time
 from datetime import datetime
 
 import streamlit as st
 
-from api_client import (
-    DEFAULT_MODEL,
-    DEFAULT_PROMPT_VARIANT,
-    MODEL_PRICING,
-    PROMPT_VARIANTS,
-    analyze_submission,
-    parse_report,
-)
+from api_client import analyze_submission, parse_report
+from config import LOCAL_PREPROCESSING, MAX_TOTAL_UPLOAD_MB, MODEL, PROMPT_VARIANT
 from excel_exporter import generate_excel, generate_factorsql_csv
+
+
+def _safe_stem(s: str) -> str:
+    """Coerce a string to a filename-safe stem. Defense-in-depth in case
+    submission_id is ever set from a less-controlled source than the auto-mint."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", s or "")
+    return cleaned.strip("._") or "submission"
 
 UNCIA_LOGO_PATH = "assets/UnciaLogo.png"
 UNCIA_PURPLE = "#552E8C"
@@ -49,12 +51,14 @@ st.markdown(
       /* Main-area brand accents */
       h1, h2, h3 {{ color: {UNCIA_PURPLE_DARK}; }}
       .stTabs [aria-selected="true"] {{ color: {UNCIA_PURPLE} !important; }}
-      .stButton > button[kind="primary"] {{
+      .stButton > button[kind="primary"],
+      .stDownloadButton > button[kind="primary"] {{
         background-color: {UNCIA_PURPLE};
         border-color: {UNCIA_PURPLE};
         color: #FFFFFF;
       }}
-      .stButton > button[kind="primary"]:hover {{
+      .stButton > button[kind="primary"]:hover,
+      .stDownloadButton > button[kind="primary"]:hover {{
         background-color: {UNCIA_PURPLE_DARK};
         border-color: {UNCIA_PURPLE_DARK};
       }}
@@ -198,7 +202,6 @@ st.markdown(
 )
 
 st.title("Uncia Sense — Document Intelligence")
-st.caption("v2.2")
 
 # ── Sidebar: upload + inputs ───────────────────────────────────────────────────
 with st.sidebar:
@@ -210,53 +213,11 @@ with st.sidebar:
         help="PDF, XML (CFDI), JPG, or PNG files",
     )
 
-    submission_id = st.text_input(
-        "Submission ID",
-        value=f"SUB-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}",
-    )
-
-    model_options = list(MODEL_PRICING.keys())
-    selected_model = st.selectbox(
-        "Model",
-        options=model_options,
-        index=model_options.index(DEFAULT_MODEL),
-        format_func=lambda m: MODEL_PRICING[m]["label"],
-        help="Pricing per 1M tokens: "
-        + " · ".join(
-            f"{MODEL_PRICING[m]['label']}: "
-            f"${MODEL_PRICING[m]['input']}/${MODEL_PRICING[m]['output']}"
-            for m in model_options
-        ),
-    )
-    pricing = MODEL_PRICING[selected_model]
-    st.caption(
-        f"${pricing['input']:.2f} input / ${pricing['output']:.2f} output per 1M tokens"
-    )
-
-    preprocess_enabled = st.checkbox(
-        "Local preprocessing (faster, fewer tokens)",
-        value=True,
-        help=(
-            "Extract text, tables, and orientation locally with PyMuPDF + Tesseract "
-            "before sending to Claude. Original PDF/image is attached as a vision "
-            "fallback when extraction confidence is low. Disable to A/B-compare "
-            "against the pure-vision pipeline."
-        ),
-    )
-
-    _variant_keys = list(PROMPT_VARIANTS.keys())
-    prompt_variant = st.selectbox(
-        "Prompt",
-        options=_variant_keys,
-        index=_variant_keys.index(DEFAULT_PROMPT_VARIANT),
-        format_func=lambda k: PROMPT_VARIANTS[k]["label"],
-        help=(
-            "Fast: simplified prompt (~3KB) — skips match matrix, terse summaries, "
-            "fewer red-flag rules. Significantly faster (~30–60s typical) for demos.\n\n"
-            "Full: original prompt (~20KB) — 29 fraud rules, cross-doc match matrix, "
-            "detailed line items. Slower (~90–120s+) but most thorough."
-        ),
-    )
+    if "submission_id_value" not in st.session_state:
+        st.session_state["submission_id_value"] = (
+            f"SUB-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')[:-3]}"
+        )
+    submission_id = st.text_input("Submission ID", key="submission_id_value")
 
     response_language = st.selectbox(
         "Response language",
@@ -279,6 +240,27 @@ with st.sidebar:
 
 # ── Analysis ───────────────────────────────────────────────────────────────────
 if analyze_btn and uploaded_files:
+    # Guard against OOM on adversarial uploads (huge scans, zip-bomb PDFs).
+    total_bytes = sum(f.size for f in uploaded_files)
+    if total_bytes > MAX_TOTAL_UPLOAD_MB * 1024 * 1024:
+        st.error(
+            f"Total upload size {total_bytes / 1024 / 1024:.1f} MB exceeds the "
+            f"{MAX_TOTAL_UPLOAD_MB} MB limit. Reduce the selection and retry."
+        )
+        st.stop()
+
+    # Clear everything from any previous run BEFORE any new UI renders, so the
+    # main area is blank during the new analysis.
+    for key in ("report", "conversation", "cost"):
+        st.session_state.pop(key, None)
+
+    # Always mint a fresh, unique submission ID for this run (microsecond-precise
+    # so back-to-back analyses of the same files still differ).
+    submission_id = f"SUB-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')[:-3]}"
+    st.session_state["submission_id"] = submission_id
+    # Reflect the new ID in the sidebar input on the next rerun.
+    st.session_state["submission_id_value"] = submission_id
+
     files = [(f.name, f.read()) for f in uploaded_files]
 
     with st.status(
@@ -287,7 +269,7 @@ if analyze_btn and uploaded_files:
         log_lines: list[str] = []
 
         log_placeholder = st.empty()
-        st.markdown("**Live response from Claude**")
+        st.markdown("**Live model response**")
         stream_box = st.container(height=400, border=True)
         with stream_box:
             stream_placeholder = st.empty()
@@ -314,30 +296,23 @@ if analyze_btn and uploaded_files:
         for f in uploaded_files:
             on_progress(f"  • {f.name} ({f.size:,} bytes)")
 
-        # Always clear stale state up front so the UI reflects this run only
-        for key in ("report", "conversation", "cost", "elapsed_seconds"):
-            st.session_state.pop(key, None)
-        st.session_state["submission_id"] = submission_id
-        st.session_state["model_used"] = selected_model
-
         try:
             t_start = time.perf_counter()
             raw, cost, conversation = analyze_submission(
                 files,
                 submission_id,
-                model=selected_model,
+                model=MODEL,
                 progress_cb=on_progress,
-                preprocess=preprocess_enabled,
+                preprocess=LOCAL_PREPROCESSING,
                 stream_cb=on_stream,
                 response_language=response_language,
-                prompt_variant=prompt_variant,
+                prompt_variant=PROMPT_VARIANT,
             )
             elapsed = time.perf_counter() - t_start
             # Stash conversation + cost immediately so the Response tab is available
             # even if JSON parsing fails below.
             st.session_state["cost"] = cost
             st.session_state["conversation"] = conversation
-            st.session_state["elapsed_seconds"] = elapsed
 
             on_progress("Parsing JSON underwriting report…")
             try:
@@ -387,7 +362,7 @@ if "report" in st.session_state:
         st.download_button(
             "⬇ FactorSQL Upload (CSV)",
             data=factorsql_bytes,
-            file_name=f"{st.session_state['submission_id']}_factorsql.csv",
+            file_name=f"{_safe_stem(st.session_state['submission_id'])}_factorsql.csv",
             mime="text/csv",
             help=(
                 "One row per receivable in FactorSQL's expected column order "
@@ -395,57 +370,19 @@ if "report" in st.session_state:
                 "INV_ID, PO_NO, REL_ID). ACCT_ID, ACCT_SUB, and REL_ID are "
                 "left blank for FactorSQL to fill in."
             ),
+            type="primary",
             use_container_width=True,
         )
     with dl2:
         st.download_button(
             "⬇ Analysis Report (Excel)",
             data=excel_bytes,
-            file_name=f"{st.session_state['submission_id']}_analysis.xlsx",
+            file_name=f"{_safe_stem(st.session_state['submission_id'])}_analysis.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             help="Multi-sheet underwriting analysis: summary, documents, packages, discrepancies, red flags, match matrix, missing docs, unassigned.",
+            type="primary",
             use_container_width=True,
         )
-
-    # ── Elapsed ────────────────────────────────────────────────────────────────
-    elapsed = st.session_state.get("elapsed_seconds")
-    if elapsed is not None:
-        if elapsed < 60:
-            elapsed_str = f"{elapsed:.1f}s"
-        else:
-            m, s = divmod(int(elapsed), 60)
-            elapsed_str = f"{m}m {s}s"
-        st.caption(f"⏱ Elapsed: {elapsed_str}")
-
-    # ── Cost ───────────────────────────────────────────────────────────────────
-    cost = st.session_state.get("cost")
-    model_used = st.session_state.get("model_used", "")
-    if cost:
-        total_tokens = (
-            cost["input_tokens"]
-            + cost["output_tokens"]
-            + cost["cache_read_tokens"]
-            + cost["cache_write_tokens"]
-        )
-        with st.expander(
-            f"💰 Cost: ${cost['total_cost']:.4f} USD · "
-            f"{total_tokens:,} tokens · {MODEL_PRICING.get(model_used, {}).get('label', model_used)}",
-            expanded=False,
-        ):
-            c1, c2 = st.columns(2)
-            with c1:
-                st.write("**Tokens**")
-                st.write(f"Input (uncached): {cost['input_tokens']:,}")
-                st.write(f"Output: {cost['output_tokens']:,}")
-                st.write(f"Cache read: {cost['cache_read_tokens']:,}")
-                st.write(f"Cache write: {cost['cache_write_tokens']:,}")
-            with c2:
-                st.write("**Cost breakdown (USD)**")
-                st.write(f"Input: ${cost['input_cost']:.4f}")
-                st.write(f"Output: ${cost['output_cost']:.4f}")
-                st.write(f"Cache read: ${cost['cache_read_cost']:.4f}")
-                st.write(f"Cache write: ${cost['cache_write_cost']:.4f}")
-                st.write(f"**Total: ${cost['total_cost']:.4f}**")
 
     st.divider()
 
@@ -555,7 +492,9 @@ if "report" in st.session_state:
                         matrix_data = [
                             {
                                 "Field": m.get("field", ""),
-                                "Invoice Value": m.get("invoice_value", ""),
+                                # `invoice_value` is polymorphic (str for invoice_number, float for
+                                # total_amount, etc.); stringify so Arrow gets a single column type.
+                                "Invoice Value": "" if m.get("invoice_value") is None else str(m.get("invoice_value")),
                                 "Confidence": m.get("confidence", ""),
                                 "Status": m.get("status", ""),
                                 "Note": m.get("note", ""),
@@ -634,7 +573,7 @@ if "report" in st.session_state:
             st.info(
                 "No preprocessed artifacts. Either local preprocessing was "
                 "disabled, the submission contained only XML, or every file "
-                "failed preprocessing and was sent as-is to Claude."
+                "failed preprocessing and was sent as-is to the model."
             )
         else:
             import io as _io
@@ -648,7 +587,7 @@ if "report" in st.session_state:
             st.download_button(
                 f"⬇ Download all ({len(preprocessed)} file(s), ZIP)",
                 data=zip_buf.getvalue(),
-                file_name=f"{st.session_state['submission_id']}_preprocessed.zip",
+                file_name=f"{_safe_stem(st.session_state['submission_id'])}_preprocessed.zip",
                 mime="application/zip",
             )
             st.divider()
@@ -684,7 +623,7 @@ if "report" in st.session_state:
                     st.download_button(
                         f"⬇ Download {stem}.md",
                         data=art["markdown"],
-                        file_name=f"{stem}.md",
+                        file_name=f"{_safe_stem(stem)}.md",
                         mime="text/markdown",
                         key=f"dl_md_{stem}",
                     )
@@ -717,7 +656,7 @@ if "report" in st.session_state:
             st.download_button(
                 "⬇ Download raw response",
                 data=raw_response,
-                file_name=f"{st.session_state['submission_id']}_response.json",
+                file_name=f"{_safe_stem(st.session_state['submission_id'])}_response.json",
                 mime="application/json",
             )
             st.code(raw_response, language="json")
@@ -725,9 +664,6 @@ if "report" in st.session_state:
 elif "conversation" in st.session_state:
     # Parse failed.
     conv = st.session_state["conversation"]
-    elapsed = st.session_state.get("elapsed_seconds")
-    if elapsed is not None:
-        st.caption(f"⏱ Elapsed: {elapsed:.1f}s")
 
     st.error("Couldn't parse the underwriting report. Inspect the Conversation and Response tabs below for diagnostics, then retry.")
     tabs = st.tabs(["Conversation", "Response"])
@@ -746,7 +682,7 @@ elif "conversation" in st.session_state:
             st.download_button(
                 "⬇ Download raw response",
                 data=raw_response,
-                file_name=f"{st.session_state.get('submission_id','response')}_response.txt",
+                file_name=f"{_safe_stem(st.session_state.get('submission_id','response'))}_response.txt",
                 mime="text/plain",
             )
             st.code(raw_response, language="json")

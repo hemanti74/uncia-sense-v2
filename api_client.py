@@ -2,8 +2,9 @@ import json
 import logging
 import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 import anthropic
 from dotenv import load_dotenv
@@ -267,133 +268,106 @@ def _content_blocks_to_text(blocks: list[dict]) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
-def _stream_anthropic_with_retry(
-    client,
-    model: str,
-    system_text: str,
-    messages: list,
-    use_prefill: bool,
+_SPINNER_INTERVAL_S = 1.0
+_STREAM_THROTTLE_S = 0.2
+_SPINNER_FRAMES = ("|", "/", "-", "\\")
+
+
+def _drive_stream(
+    chunks: Iterator[str],
+    prefix: str,
     report: Callable[[str], None],
     stream_cb: Optional[Callable[[str], None]],
-    max_tokens: int = ANTHROPIC_MAX_OUTPUT_TOKENS,
-) -> tuple[str, object]:
-    """Stream from Anthropic with automatic retry. Returns (raw_text, final_message)."""
-    SPINNER_INTERVAL_S = 5.0
-    spinner_frames = ("|", "/", "-", "\\")
-    prefix = "{" if use_prefill else ""
+) -> str:
+    """Pump text chunks from a provider stream: tick the spinner, throttle stream_cb,
+    accumulate text. Returns the accumulated text with `prefix` prepended."""
+    text_parts: list[str] = []
+    last_tick = 0.0
+    last_stream_tick = 0.0
+    spinner_idx = 0
+    for text in chunks:
+        text_parts.append(text)
+        now = time.monotonic()
+        if now - last_tick >= _SPINNER_INTERVAL_S:
+            report(f"Awaiting response {_SPINNER_FRAMES[spinner_idx % 4]}")
+            spinner_idx += 1
+            last_tick = now
+        if stream_cb and now - last_stream_tick >= _STREAM_THROTTLE_S:
+            stream_cb(prefix + "".join(text_parts))
+            last_stream_tick = now
+    if stream_cb:
+        stream_cb(prefix + "".join(text_parts))
+    return prefix + "".join(text_parts)
 
+
+def _stream_with_retry(
+    open_stream,                          # () -> ContextManager yielding (chunks, get_final)
+    prefix: str,
+    report: Callable[[str], None],
+    stream_cb: Optional[Callable[[str], None]],
+) -> tuple[str, object]:
+    """Run a streaming attempt and retry on transient errors. `open_stream` is a
+    callable returning a context manager that yields `(chunks_iter, get_final_callable)`.
+    The context manager keeps any SDK resources alive while we read the stream and
+    fetch the final usage/message."""
     for attempt in range(STREAM_MAX_ATTEMPTS):
-        text_parts: list[str] = []
-        last_tick = 0.0
-        last_stream_tick = 0.0
-        spinner_idx = 0
         if stream_cb and attempt > 0:
             stream_cb("")
-
         try:
-            with client.messages.stream(
-                model=model,
-                max_tokens=max_tokens,
-                system=[{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}],
-                messages=messages,
-            ) as stream:
-                for text in stream.text_stream:
-                    text_parts.append(text)
-                    now = time.monotonic()
-                    if now - last_tick >= SPINNER_INTERVAL_S:
-                        report(f"Awaiting response {spinner_frames[spinner_idx % 4]}")
-                        spinner_idx += 1
-                        last_tick = now
-                    if stream_cb and now - last_stream_tick >= 0.2:
-                        stream_cb(prefix + "".join(text_parts))
-                        last_stream_tick = now
-                if stream_cb:
-                    stream_cb(prefix + "".join(text_parts))
-                final_message = stream.get_final_message()
-            return prefix + "".join(text_parts), final_message
+            with open_stream() as (chunks, get_final):
+                raw = _drive_stream(chunks, prefix, report, stream_cb)
+                return raw, get_final()
         except Exception as e:
             is_last = attempt >= STREAM_MAX_ATTEMPTS - 1
             if is_last or not _is_retriable_error(e):
                 raise
             wait_s = STREAM_BACKOFF_SECONDS[min(attempt, len(STREAM_BACKOFF_SECONDS) - 1)]
             report(
-                f"Claude API busy ({type(e).__name__}); retrying in {wait_s:.0f}s "
+                f"Model API busy ({type(e).__name__}); retrying in {wait_s:.0f}s "
                 f"(attempt {attempt + 2}/{STREAM_MAX_ATTEMPTS})…"
             )
             time.sleep(wait_s)
+    raise RuntimeError("Streaming exhausted retries")
 
-    raise RuntimeError("Anthropic streaming exhausted retries")
+
+@contextmanager
+def _anthropic_stream(client, model, system_text, messages, max_tokens):
+    with client.messages.stream(
+        model=model,
+        max_tokens=max_tokens,
+        system=[{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}],
+        messages=messages,
+    ) as stream:
+        yield stream.text_stream, stream.get_final_message
 
 
-def _stream_deepseek_with_retry(
-    client,
-    model: str,
-    system_text: str,
-    user_text: str,
-    report: Callable[[str], None],
-    stream_cb: Optional[Callable[[str], None]],
-    max_tokens: int = DEEPSEEK_MAX_OUTPUT_TOKENS,
-) -> tuple[str, object]:
-    """Stream from DeepSeek (OpenAI-compatible) with automatic retry.
-    Returns (raw_text, final_usage)."""
-    SPINNER_INTERVAL_S = 5.0
-    spinner_frames = ("|", "/", "-", "\\")
+@contextmanager
+def _deepseek_stream(client, model, system_text, user_text, max_tokens):
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_text},
+            {"role": "user", "content": user_text},
+        ],
+        max_tokens=max_tokens,
+        stream=True,
+        stream_options={"include_usage": True},
+        response_format={"type": "json_object"},
+    )
+    state: dict = {"usage": None}
 
-    for attempt in range(STREAM_MAX_ATTEMPTS):
-        text_parts: list[str] = []
-        last_tick = 0.0
-        last_stream_tick = 0.0
-        spinner_idx = 0
-        final_usage = None
-        if stream_cb and attempt > 0:
-            stream_cb("")
+    def _chunks():
+        for chunk in response:
+            # Final usage chunk often has empty choices.
+            if getattr(chunk, "usage", None):
+                state["usage"] = chunk.usage
+            if not getattr(chunk, "choices", None):
+                continue
+            content = getattr(chunk.choices[0].delta, "content", None)
+            if content:
+                yield content
 
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_text},
-                    {"role": "user", "content": user_text},
-                ],
-                max_tokens=max_tokens,
-                stream=True,
-                stream_options={"include_usage": True},
-                response_format={"type": "json_object"},
-            )
-            for chunk in response:
-                # Final usage chunk often has empty choices
-                if getattr(chunk, "usage", None):
-                    final_usage = chunk.usage
-                if not getattr(chunk, "choices", None):
-                    continue
-                delta = chunk.choices[0].delta
-                content = getattr(delta, "content", None)
-                if not content:
-                    continue
-                text_parts.append(content)
-                now = time.monotonic()
-                if now - last_tick >= SPINNER_INTERVAL_S:
-                    report(f"Awaiting response {spinner_frames[spinner_idx % 4]}")
-                    spinner_idx += 1
-                    last_tick = now
-                if stream_cb and now - last_stream_tick >= 0.2:
-                    stream_cb("".join(text_parts))
-                    last_stream_tick = now
-            if stream_cb:
-                stream_cb("".join(text_parts))
-            return "".join(text_parts), final_usage
-        except Exception as e:
-            is_last = attempt >= STREAM_MAX_ATTEMPTS - 1
-            if is_last or not _is_retriable_error(e):
-                raise
-            wait_s = STREAM_BACKOFF_SECONDS[min(attempt, len(STREAM_BACKOFF_SECONDS) - 1)]
-            report(
-                f"DeepSeek API busy ({type(e).__name__}); retrying in {wait_s:.0f}s "
-                f"(attempt {attempt + 2}/{STREAM_MAX_ATTEMPTS})…"
-            )
-            time.sleep(wait_s)
-
-    raise RuntimeError("DeepSeek streaming exhausted retries")
+    yield _chunks(), lambda: state["usage"]
 
 
 def analyze_submission(
@@ -416,26 +390,7 @@ def analyze_submission(
     provider = pricing.get("provider", "anthropic")
 
     variant = prompt_variant if prompt_variant in PROMPT_VARIANTS else DEFAULT_PROMPT_VARIANT
-    report(
-        f"Starting submission {submission_id} with {len(files)} file(s) · "
-        f"model={model} ({provider}) · prompt={variant} · "
-        f"preprocess={'on' if preprocess else 'off'} · "
-        f"response_lang={(response_language or 'en').lower()}"
-    )
-
-    if preprocess:
-        from pdf_processor import get_tesseract_status
-
-        status = get_tesseract_status()
-        if status["available"]:
-            ver = f" v{status['version']}" if status["version"] else ""
-            report(f"Tesseract OCR: ✓ available{ver} ({status['path']})")
-        else:
-            report(
-                "Tesseract OCR: ✗ not installed — scanned/photo files will be sent "
-                "as base64 (or skipped, if provider is text-only). Install UB Mannheim "
-                "build and add eng+spa packs, or set $env:TESSERACT_CMD."
-            )
+    report(f"Starting submission {submission_id} with {len(files)} file(s)")
 
     if provider == "deepseek" and not preprocess:
         report(
@@ -504,7 +459,7 @@ def analyze_submission(
         }
     )
 
-    report(f"Sending {len(content_blocks) - 1} document(s) for analysis (streaming, {provider})…")
+    report(f"Sending {len(content_blocks) - 1} document(s) for analysis…")
 
     if provider == "anthropic":
         client = anthropic.Anthropic()
@@ -512,8 +467,13 @@ def analyze_submission(
         messages = [{"role": "user", "content": content_blocks}]
         if use_prefill:
             messages.append({"role": "assistant", "content": "{"})
-        raw, final_message = _stream_anthropic_with_retry(
-            client, model, system_text, messages, use_prefill, report, stream_cb,
+        raw, final_message = _stream_with_retry(
+            lambda: _anthropic_stream(
+                client, model, system_text, messages, ANTHROPIC_MAX_OUTPUT_TOKENS,
+            ),
+            prefix="{" if use_prefill else "",
+            report=report,
+            stream_cb=stream_cb,
         )
         usage = getattr(final_message, "usage", None)
     elif provider == "deepseek":
@@ -530,8 +490,13 @@ def analyze_submission(
             )
         client = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
         user_text = _content_blocks_to_text(content_blocks)
-        raw, usage = _stream_deepseek_with_retry(
-            client, model, system_text, user_text, report, stream_cb,
+        raw, usage = _stream_with_retry(
+            lambda: _deepseek_stream(
+                client, model, system_text, user_text, DEEPSEEK_MAX_OUTPUT_TOKENS,
+            ),
+            prefix="",
+            report=report,
+            stream_cb=stream_cb,
         )
     else:
         raise ValueError(f"Unknown provider for model {model}: {provider}")
@@ -554,8 +519,6 @@ def analyze_submission(
                 f"prompt: {u.get('prompt_tokens', '?')} (cache hit: {u.get('prompt_cache_hit_tokens', 0)}) · "
                 f"completion: {u.get('completion_tokens', '?')}"
             )
-    if cost:
-        report(f"Estimated cost: ${cost['total_cost']:.4f} USD")
 
     conversation = {
         "model": model,

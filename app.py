@@ -239,8 +239,12 @@ with st.sidebar:
     )
 
 # ── Analysis ───────────────────────────────────────────────────────────────────
+# First pass after the click: validate size, mint a fresh submission ID, drop all
+# stale results, and trigger a rerun. The rerun is what actually clears the main
+# area on screen — without it, the previous Packages/Documents/Unassigned panels
+# remain visible during the new analysis (Streamlit doesn't re-render the
+# section below the analyze block until the long-running call returns).
 if analyze_btn and uploaded_files:
-    # Guard against OOM on adversarial uploads (huge scans, zip-bomb PDFs).
     total_bytes = sum(f.size for f in uploaded_files)
     if total_bytes > MAX_TOTAL_UPLOAD_MB * 1024 * 1024:
         st.error(
@@ -249,18 +253,19 @@ if analyze_btn and uploaded_files:
         )
         st.stop()
 
-    # Clear everything from any previous run BEFORE any new UI renders, so the
-    # main area is blank during the new analysis.
     for key in ("report", "conversation", "cost"):
         st.session_state.pop(key, None)
 
-    # Always mint a fresh, unique submission ID for this run (microsecond-precise
-    # so back-to-back analyses of the same files still differ).
     submission_id = f"SUB-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')[:-3]}"
     st.session_state["submission_id"] = submission_id
-    # Reflect the new ID in the sidebar input on the next rerun.
     st.session_state["submission_id_value"] = submission_id
+    st.session_state["_run_analysis"] = True
+    st.rerun()
 
+# Second pass: cleared state has propagated to the DOM, sidebar shows the new
+# submission ID. Now actually run the analysis.
+if st.session_state.pop("_run_analysis", False) and uploaded_files:
+    submission_id = st.session_state["submission_id"]
     files = [(f.name, f.read()) for f in uploaded_files]
 
     with st.status(

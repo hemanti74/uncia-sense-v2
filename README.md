@@ -1,6 +1,6 @@
 # Uncia Sense — Invoice Factoring Verification
 
-A Streamlit application that uses Anthropic Claude or DeepSeek (debug-mode selectable) to analyze invoice factoring submission packages and produce two outputs:
+A Streamlit application that uses Anthropic Claude or DeepSeek (selectable in the sidebar) to analyze invoice factoring submission packages and produce two outputs:
 
 1. **FactorSQL upload (CSV)** — one row per receivable in FactorSQL's expected column order, ready to import.
 2. **Underwriting analysis (Excel)** — multi-sheet workbook with documents, packages, discrepancies, red flags, match matrix, missing docs, and unassigned items.
@@ -13,7 +13,7 @@ The system handles **PDF, XML (CFDI), JPG, and PNG** documents in **English, Spa
 
 - **Python 3.10+** (tested on 3.14)
 - **Anthropic API key** — get one at <https://console.anthropic.com/>
-- **DeepSeek API key** (optional, debug mode only) — get one at <https://platform.deepseek.com/>
+- **DeepSeek API key** (optional) — get one at <https://platform.deepseek.com/>
 - **Tesseract OCR** (recommended, Windows) — needed only for scanned PDFs and phone-photo images. Born-digital PDFs work without it.
 
 ---
@@ -48,14 +48,14 @@ Edit `.env`:
 
 ```ini
 ANTHROPIC_API_KEY=sk-ant-...
-DEEPSEEK_API_KEY=sk-...   # optional — only needed if you select a DeepSeek model in debug mode
+DEEPSEEK_API_KEY=sk-...   # optional — only needed if you select a DeepSeek model
 ```
 
-`ANTHROPIC_API_KEY` is required (demo mode uses Claude Opus 4.7). `DEEPSEEK_API_KEY` is only consulted when a DeepSeek model is selected from the debug-mode model dropdown.
+`ANTHROPIC_API_KEY` is required (the default model is Claude Opus 4.7). `DEEPSEEK_API_KEY` is only consulted when a DeepSeek model is selected from the sidebar model dropdown.
 
 ### 4. (Recommended) Install Tesseract OCR
 
-Local preprocessing extracts text from PDFs and images before sending to Claude. Born-digital PDFs work with the pure-pip stack (PyMuPDF). **Scanned PDFs and phone photos need Tesseract** — without it, those files fall back to being sent as base64 to Claude (same as the old pipeline) and you'll see a warning in the debug log.
+Local preprocessing extracts text from PDFs and images before sending to Claude. Born-digital PDFs work with the pure-pip stack (PyMuPDF). **Scanned PDFs and phone photos need Tesseract** — without it, those files fall back to being sent as base64 to Claude (same as the old pipeline) and you'll see a warning in the progress log.
 
 1. Download the UB Mannheim Windows build: https://github.com/UB-Mannheim/tesseract/wiki
 2. During install, check the **English** and **Spanish** language packs (the app uses `eng+spa`).
@@ -75,29 +75,30 @@ The app auto-detects Tesseract from `TESSERACT_CMD`, then common install paths, 
 streamlit run app.py
 ```
 
-Streamlit opens the app at <http://localhost:8501>. Append `?debug=1` to the URL (<http://localhost:8501/?debug=1>) to enable [debug mode](#debug-mode).
+Streamlit opens the app at <http://localhost:8501>.
 
 ---
 
-## Usage (demo mode — default)
+## Usage
 
 1. In the sidebar, upload one or more submission documents (PDF / XML / JPG / PNG).
 2. Confirm or edit the auto-generated **Submission ID** (used as the filename stem for the two downloads).
-3. Choose **Response language** — English or Spanish. Affects free-text fields only (underwriter summaries, descriptions, notes, reasons). JSON keys and enum values (`APPROVE`, `HIGH`, `FAVORABLE`, etc.) always stay in English. Party names and product descriptions remain verbatim in the source document's language.
-4. Click **Analyze**. The status widget cycles through high-level stages:
-   - `Preparing documents…` — local OCR / text extraction
-   - `Awaiting response from Claude…` — Claude generates the JSON (rotating spinner ticks every 5 s)
-   - `Processing analysis…` — parsing and report rendering
-5. Review results in the tabs:
+3. Pick a **Model** (default Opus 4.7), toggle **Local preprocessing** (default on), and choose a **Prompt** variant — Fast (~30–60 s) or Full (~90–120 s+).
+4. Choose **Response language** — English or Spanish. Affects free-text fields only (underwriter summaries, descriptions, notes, reasons). JSON keys and enum values (`APPROVE`, `HIGH`, `FAVORABLE`, etc.) always stay in English. Party names and product descriptions remain verbatim in the source document's language.
+5. Click **Analyze**. The expanded status widget shows a verbose log (per-file preprocessing milestones, Tesseract banner, retry notices) and the **Live response from Claude** stream box renders the JSON token-by-token (~5× per second).
+6. Review results:
    - **Top metrics** — document count, receivables, orientation issues, total advance eligible, overall recommendation
+   - **Cost panel** — input/output/cache tokens with USD breakdown for the selected model
    - **Packages tab** — per-receivable: total / prepayment / amount due, confidence, advance amount, discrepancies, red flags, missing docs, match matrix
    - **Documents tab** — per-document: language, orientation, OCR quality, doc notes
    - **Unassigned tab** — documents that couldn't be matched to a receivable
-6. Download the two output files:
+   - **Preprocessed tab** — downloadable per-file `.md` artifacts produced by the local preprocessor (plus a ZIP)
+   - **Raw JSON tab** — full underwriting report
+   - **Conversation tab** — system prompt + sanitized user message blocks
+   - **Response tab** — raw streamed text with download
+7. Download the two output files:
    - **⬇ FactorSQL Upload (CSV)** — `{submission_id}_factorsql.csv`
    - **⬇ Analysis Report (Excel)** — `{submission_id}_analysis.xlsx`
-
-In demo mode the app uses Opus 4.7 with the **Fast** prompt and local preprocessing on — no extra knobs to fiddle with.
 
 ---
 
@@ -127,7 +128,7 @@ All receivables are included regardless of recommendation — declined invoices 
 
 Eight sheets:
 
-- **Summary** — submission ID, totals, primary languages, overall recommendation
+- **Summary** — submission ID, totals, overall recommendation
 - **Documents** — per-document metadata (filename, doc_type, language, orientation, OCR quality, scan/photo flag)
 - **Packages** — per-receivable: invoice fields including **Total Amount**, **Prepayment Amount**, **Amount Due**, buyer/seller, PO, advance amount, recommendation, underwriter summary
 - **Discrepancies** — flagged differences with direction (FAVORABLE / NEUTRAL / ADVERSE) and severity
@@ -138,32 +139,17 @@ Eight sheets:
 
 ---
 
-## Debug mode
+## Sidebar controls
 
-Append `?debug=1` (or `?debug=true`, `?debug=yes`, `?debug=on`) to the URL. Debug mode unlocks:
-
-- **Sidebar additions:**
-  - **Model selector** — options across two providers (default Opus 4.7):
-    - Anthropic: Opus 4.7, Opus 4.6, Sonnet 4.6, Haiku 4.5
-    - DeepSeek: V4 Flash (`deepseek-v4-flash`), V4 Pro (`deepseek-v4-pro`), and the deprecated V3 (`deepseek-chat`) and R1 (`deepseek-reasoner`) aliases
-  - **Local preprocessing** toggle — disable to A/B-compare against the pure-vision pipeline (Anthropic only; DeepSeek is text-only and ignores the toggle)
-  - **Prompt selector** — Fast (default, ~2,400 tokens, ~30–60 s typical) or Full (~6,100 tokens, ~90–120 s+ typical)
-- **Live response stream** — scrollable 400 px box that shows Claude's response building token-by-token, refreshed ~5× per second
-- **Verbose progress log** — per-file preprocessing milestones (`page 2/4: Tesseract OCR running (eng+spa)…`, `Tesseract OCR'd 2/5 page(s) · confidence=0.91`), Tesseract availability banner, cost line
-- **Cost panel** — input/output/cache tokens with USD breakdown per model
-- **Four diagnostic tabs:**
-  - **Preprocessed** — downloadable per-file `.md` artifacts produced by the local preprocessor, plus a single ZIP for the whole submission
-  - **Raw JSON** — full underwriting report
-  - **Conversation** — system prompt + sanitized user message blocks
-  - **Response** — raw streamed text with download
-
-In demo mode none of the above is visible — only the high-level status label, the top metrics, and the three production tabs (Packages / Documents / Unassigned).
+- **Model selector** — options across two providers (default Opus 4.7):
+  - Anthropic: Opus 4.7, Opus 4.6, Sonnet 4.6, Haiku 4.5
+  - DeepSeek: V4 Flash (`deepseek-v4-flash`), V4 Pro (`deepseek-v4-pro`), and the deprecated V3 (`deepseek-chat`) and R1 (`deepseek-reasoner`) aliases
+- **Local preprocessing** toggle — disable to A/B-compare against the pure-vision pipeline (Anthropic only; DeepSeek is text-only and ignores the toggle)
+- **Prompt selector** — Fast (default, ~2,400 tokens, ~30–60 s typical) or Full (~6,100 tokens, ~90–120 s+ typical)
 
 ---
 
 ## Two prompt variants
-
-Selectable in debug mode; demo mode always uses **Fast**.
 
 - **Fast** (default) — `prompts/system_v2_fast.txt` · ~2,400 tokens
 
@@ -179,7 +165,7 @@ Both produce the same JSON shape, so downloads, tabs, and the Excel report work 
 
 ## Providers — Anthropic vs DeepSeek
 
-The model dropdown (debug mode) routes to one of two providers automatically. The JSON output schema is identical; only the API mechanics differ.
+The model dropdown routes to one of two providers automatically. The JSON output schema is identical; only the API mechanics differ.
 
 ### Anthropic (Claude) — full vision
 
@@ -199,7 +185,7 @@ The model dropdown (debug mode) routes to one of two providers automatically. Th
 - Output mode: `response_format={"type": "json_object"}` to enforce JSON-only output.
 - Uses the OpenAI Python SDK pointed at `https://api.deepseek.com`.
 
-When a DeepSeek model is selected, the up-front status log (debug mode) shows `model=deepseek-chat (deepseek)` so you know which provider is being called. Retry logic with 5/15/30 s backoff applies to both providers.
+When a DeepSeek model is selected, the up-front status log shows `model=deepseek-v4-flash (deepseek)` so you know which provider is being called. Retry logic with 5/15/30 s backoff applies to both providers.
 
 ---
 
@@ -207,7 +193,7 @@ When a DeepSeek model is selected, the up-front status log (debug mode) shows `m
 
 ```
 .
-├── app.py                          # Streamlit UI (debug mode via ?debug=1)
+├── app.py                          # Streamlit UI
 ├── api_client.py                   # Claude API client with prompt caching + variant selection
 ├── file_handler.py                 # PDF/image/XML → Claude content blocks (text + optional vision fallback)
 ├── pdf_processor.py                # Local PDF/image preprocessing (PyMuPDF + Tesseract OSD + OCR)
@@ -227,7 +213,7 @@ When a DeepSeek model is selected, the up-front status log (debug mode) shows `m
 - **Prompt caching**: Anthropic — each variant's system prompt is cached via `cache_control: ephemeral`. DeepSeek — automatic provider-side context cache; cache-hit tokens are billed at a discounted rate. Switching variants or providers is a one-time cache miss.
 - **Model**: default `claude-opus-4-7`. `temperature` is intentionally omitted (removed on Opus 4.7). Sonnet 4.6 does not support assistant message prefill — handled automatically per-model. DeepSeek selection requires `DEEPSEEK_API_KEY` in `.env`; missing key fails the request with a clear error.
 - **DeepSeek vs Anthropic**: same prompt, same JSON schema. DeepSeek is text-only — vision-fallback document/image blocks are replaced with an inline note so DeepSeek won't see the original. For best DeepSeek results, ensure local preprocessing is on (default) and Tesseract is installed for scanned docs.
-- **Local preprocessing** (default on): PDFs and images are extracted to Markdown locally with PyMuPDF (and Tesseract for scans), sent as a text block prefaced with a ```json metadata header (filename, page count, language detected, OCR quality, rotation applied, extraction confidence, fallback flag). The original file is attached as a vision fallback only when extraction confidence < 0.85 or the source is a phone photo. Disable from the debug sidebar to A/B-compare against the pure-vision pipeline.
+- **Local preprocessing** (default on): PDFs and images are extracted to Markdown locally with PyMuPDF (and Tesseract for scans), sent as a text block prefaced with a ```json metadata header (filename, page count, language detected, OCR quality, rotation applied, extraction confidence, fallback flag). The original file is attached as a vision fallback only when extraction confidence < 0.85 or the source is a phone photo. Disable from the sidebar to A/B-compare against the pure-vision pipeline.
 - **XML files**: always pass through inline as text with a `=== FILE: <name> ===` marker (CFDI XML is the legal source of truth — no preprocessing needed).
 - **Receivable balance**: factoring critical. The prompt extracts `total_amount` (gross), `prepayment_amount` (deposits/advances shown on the invoice), and `amount_due = total_amount − prepayment_amount`. `BAL_ASSIGN` in the FactorSQL CSV and `advance_eligible_amount` in the JSON both use `amount_due`, not `total_amount`.
 - **Response language**: per-submission English/Spanish toggle injected into the user message (not the system prompt) so prompt caching stays warm regardless of choice.

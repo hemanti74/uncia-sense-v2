@@ -197,14 +197,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Debug mode is toggled by adding ?debug=1 to the URL. When off (demo default)
-# the UI hides model selection, preprocessing toggle, live response stream,
-# cost panel, and the diagnostic tabs (Preprocessed / Raw JSON / Conversation /
-# Response).
-debug_mode = st.query_params.get("debug", "").lower() in ("1", "true", "yes", "on")
-
 st.title("Uncia Sense — Document Intelligence")
-st.caption("v2.2 · debug mode" if debug_mode else "v2.2")
+st.caption("v2.2")
 
 # ── Sidebar: upload + inputs ───────────────────────────────────────────────────
 with st.sidebar:
@@ -221,54 +215,48 @@ with st.sidebar:
         value=f"SUB-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}",
     )
 
-    if debug_mode:
-        model_options = list(MODEL_PRICING.keys())
-        selected_model = st.selectbox(
-            "Model",
-            options=model_options,
-            index=model_options.index(DEFAULT_MODEL),
-            format_func=lambda m: MODEL_PRICING[m]["label"],
-            help="Pricing per 1M tokens: "
-            + " · ".join(
-                f"{MODEL_PRICING[m]['label']}: "
-                f"${MODEL_PRICING[m]['input']}/${MODEL_PRICING[m]['output']}"
-                for m in model_options
-            ),
-        )
-        pricing = MODEL_PRICING[selected_model]
-        st.caption(
-            f"${pricing['input']:.2f} input / ${pricing['output']:.2f} output per 1M tokens"
-        )
+    model_options = list(MODEL_PRICING.keys())
+    selected_model = st.selectbox(
+        "Model",
+        options=model_options,
+        index=model_options.index(DEFAULT_MODEL),
+        format_func=lambda m: MODEL_PRICING[m]["label"],
+        help="Pricing per 1M tokens: "
+        + " · ".join(
+            f"{MODEL_PRICING[m]['label']}: "
+            f"${MODEL_PRICING[m]['input']}/${MODEL_PRICING[m]['output']}"
+            for m in model_options
+        ),
+    )
+    pricing = MODEL_PRICING[selected_model]
+    st.caption(
+        f"${pricing['input']:.2f} input / ${pricing['output']:.2f} output per 1M tokens"
+    )
 
-        preprocess_enabled = st.checkbox(
-            "Local preprocessing (faster, fewer tokens)",
-            value=True,
-            help=(
-                "Extract text, tables, and orientation locally with PyMuPDF + Tesseract "
-                "before sending to Claude. Original PDF/image is attached as a vision "
-                "fallback when extraction confidence is low. Disable to A/B-compare "
-                "against the pure-vision pipeline."
-            ),
-        )
+    preprocess_enabled = st.checkbox(
+        "Local preprocessing (faster, fewer tokens)",
+        value=True,
+        help=(
+            "Extract text, tables, and orientation locally with PyMuPDF + Tesseract "
+            "before sending to Claude. Original PDF/image is attached as a vision "
+            "fallback when extraction confidence is low. Disable to A/B-compare "
+            "against the pure-vision pipeline."
+        ),
+    )
 
-        _variant_keys = list(PROMPT_VARIANTS.keys())
-        prompt_variant = st.selectbox(
-            "Prompt",
-            options=_variant_keys,
-            index=_variant_keys.index(DEFAULT_PROMPT_VARIANT),
-            format_func=lambda k: PROMPT_VARIANTS[k]["label"],
-            help=(
-                "Fast: simplified prompt (~3KB) — skips match matrix, terse summaries, "
-                "fewer red-flag rules. Significantly faster (~30–60s typical) for demos.\n\n"
-                "Full: original prompt (~20KB) — 29 fraud rules, cross-doc match matrix, "
-                "detailed line items. Slower (~90–120s+) but most thorough."
-            ),
-        )
-    else:
-        # Demo defaults — Opus 4.7 with local preprocessing on, fast prompt
-        selected_model = DEFAULT_MODEL
-        preprocess_enabled = True
-        prompt_variant = DEFAULT_PROMPT_VARIANT
+    _variant_keys = list(PROMPT_VARIANTS.keys())
+    prompt_variant = st.selectbox(
+        "Prompt",
+        options=_variant_keys,
+        index=_variant_keys.index(DEFAULT_PROMPT_VARIANT),
+        format_func=lambda k: PROMPT_VARIANTS[k]["label"],
+        help=(
+            "Fast: simplified prompt (~3KB) — skips match matrix, terse summaries, "
+            "fewer red-flag rules. Significantly faster (~30–60s typical) for demos.\n\n"
+            "Full: original prompt (~20KB) — 29 fraud rules, cross-doc match matrix, "
+            "detailed line items. Slower (~90–120s+) but most thorough."
+        ),
+    )
 
     response_language = st.selectbox(
         "Response language",
@@ -294,58 +282,21 @@ if analyze_btn and uploaded_files:
     files = [(f.name, f.read()) for f in uploaded_files]
 
     with st.status(
-        f"Analyzing {len(files)} document(s)…", expanded=debug_mode
+        f"Analyzing {len(files)} document(s)…", expanded=True
     ) as status:
         log_lines: list[str] = []
 
-        if debug_mode:
-            log_placeholder = st.empty()
-            st.markdown("**Live response from Claude**")
-            stream_box = st.container(height=400, border=True)
-            with stream_box:
-                stream_placeholder = st.empty()
-                stream_placeholder.caption("_(waiting for first token…)_")
-        else:
-            log_placeholder = None
-            stream_placeholder = None
+        log_placeholder = st.empty()
+        st.markdown("**Live response from Claude**")
+        stream_box = st.container(height=400, border=True)
+        with stream_box:
+            stream_placeholder = st.empty()
+            stream_placeholder.caption("_(waiting for first token…)_")
 
         STREAM_PREFIX = "Awaiting response"
 
-        # Demo mode: classify each progress message and update the st.status
-        # label to one of three high-level stages. Returns the new label or
-        # None if the message shouldn't change the label.
-        def _demo_label(msg: str) -> "str | None":
-            s = msg.strip()
-            if s.startswith("Claude API busy") or s.startswith("DeepSeek API busy"):
-                return "Model is busy — retrying…"
-            if s.startswith(STREAM_PREFIX):
-                # Preserve the rotating spinner char appended by api_client.
-                spinner_char = s[len(STREAM_PREFIX):].strip()
-                tail = f" {spinner_char}" if spinner_char else ""
-                return f"Awaiting response from Claude…{tail}"
-            if s.startswith("Sending"):
-                return "Awaiting response from Claude…"
-            if s.startswith("Response complete") or s.startswith("Parsing JSON"):
-                return "Processing analysis…"
-            if (
-                s.startswith("[")                  # "[N/M] Processing …"
-                or s.startswith("Starting submission")
-                or s.startswith("Tesseract OCR")   # banner + per-page lines
-                or s.startswith("preprocessing")
-                or s.startswith("page ")
-                or s.startswith("no OCR")
-            ):
-                return "Preparing documents…"
-            return None
-
         def on_progress(msg: str) -> None:
-            if log_placeholder is None:
-                # Demo mode — map to a high-level stage label on the status widget.
-                new_label = _demo_label(msg)
-                if new_label is not None:
-                    status.update(label=new_label)
-                return
-            # Debug mode — full log behavior.
+            # Collapse consecutive "Awaiting response …" spinner ticks into one line.
             if (
                 msg.startswith(STREAM_PREFIX)
                 and log_lines
@@ -357,14 +308,11 @@ if analyze_btn and uploaded_files:
             log_placeholder.code("\n".join(log_lines), language="log")
 
         def on_stream(text: str) -> None:
-            if stream_placeholder is not None:
-                stream_placeholder.code(text, language="json")
+            stream_placeholder.code(text, language="json")
 
-        # List the uploaded files up front (debug only)
-        if debug_mode:
-            on_progress("Uploaded files:")
-            for f in uploaded_files:
-                on_progress(f"  • {f.name} ({f.size:,} bytes)")
+        on_progress("Uploaded files:")
+        for f in uploaded_files:
+            on_progress(f"  • {f.name} ({f.size:,} bytes)")
 
         # Always clear stale state up front so the UI reflects this run only
         for key in ("report", "conversation", "cost", "elapsed_seconds"):
@@ -411,19 +359,7 @@ if analyze_btn and uploaded_files:
                 )
         except Exception as e:
             on_progress(f"ERROR: {e}")
-            # Friendlier label for demo mode on common transient errors.
-            err_text = str(e).lower()
-            if "overloaded" in err_text:
-                friendly = "Claude is overloaded — please try again in a minute."
-            elif "rate_limit" in err_text or "rate limit" in err_text:
-                friendly = "Rate limited by Claude — please wait a moment and retry."
-            elif "timeout" in err_text or "connection" in err_text:
-                friendly = "Network/timeout error contacting Claude — please retry."
-            else:
-                friendly = f"Failed: {e}" if debug_mode else "Analysis failed — please retry."
-            status.update(label=friendly, state="error")
-            if not debug_mode:
-                st.error(friendly)
+            status.update(label=f"Failed: {e}", state="error")
             st.stop()
 
 # ── Results ────────────────────────────────────────────────────────────────────
@@ -481,10 +417,10 @@ if "report" in st.session_state:
             elapsed_str = f"{m}m {s}s"
         st.caption(f"⏱ Elapsed: {elapsed_str}")
 
-    # ── Cost (debug only) ──────────────────────────────────────────────────────
+    # ── Cost ───────────────────────────────────────────────────────────────────
     cost = st.session_state.get("cost")
     model_used = st.session_state.get("model_used", "")
-    if debug_mode and cost:
+    if cost:
         total_tokens = (
             cost["input_tokens"]
             + cost["output_tokens"]
@@ -529,9 +465,7 @@ if "report" in st.session_state:
     st.divider()
 
     # ── Tabs ───────────────────────────────────────────────────────────────────
-    tab_labels = ["Packages", "Documents", "Unassigned"]
-    if debug_mode:
-        tab_labels += ["Preprocessed", "Raw JSON", "Conversation", "Response"]
+    tab_labels = ["Packages", "Documents", "Unassigned", "Preprocessed", "Raw JSON", "Conversation", "Response"]
     tabs = st.tabs(tab_labels)
 
     # ── Packages tab ───────────────────────────────────────────────────────────
@@ -682,112 +616,111 @@ if "report" in st.session_state:
         for u in unassigned:
             st.warning(f"**{u.get('filename','')}** — {u.get('reason','')}")
 
-    if debug_mode:
-        # ── Preprocessed tab ───────────────────────────────────────────────────
-        with tabs[3]:
-            preprocessed = (st.session_state.get("conversation") or {}).get(
-                "preprocessed_documents", []
+    # ── Preprocessed tab ───────────────────────────────────────────────────────
+    with tabs[3]:
+        preprocessed = (st.session_state.get("conversation") or {}).get(
+            "preprocessed_documents", []
+        )
+        st.markdown(
+            "**Format:** UTF-8 Markdown (`.md`). Each file starts with a fenced "
+            "` ```json ` metadata header (filename, page count, language, OCR "
+            "quality, rotation applied, extraction confidence, fallback flag), "
+            "followed by a `=== FILE: <name> ===` marker, per-page sections "
+            "(`## Page N`), preserved text in reading order, and any detected "
+            "tables rendered as GFM pipe tables. XML/CFDI files are pass-through "
+            "(not preprocessed) and don't appear here."
+        )
+        if not preprocessed:
+            st.info(
+                "No preprocessed artifacts. Either local preprocessing was "
+                "disabled, the submission contained only XML, or every file "
+                "failed preprocessing and was sent as-is to Claude."
             )
-            st.markdown(
-                "**Format:** UTF-8 Markdown (`.md`). Each file starts with a fenced "
-                "` ```json ` metadata header (filename, page count, language, OCR "
-                "quality, rotation applied, extraction confidence, fallback flag), "
-                "followed by a `=== FILE: <name> ===` marker, per-page sections "
-                "(`## Page N`), preserved text in reading order, and any detected "
-                "tables rendered as GFM pipe tables. XML/CFDI files are pass-through "
-                "(not preprocessed) and don't appear here."
-            )
-            if not preprocessed:
-                st.info(
-                    "No preprocessed artifacts. Either local preprocessing was "
-                    "disabled, the submission contained only XML, or every file "
-                    "failed preprocessing and was sent as-is to Claude."
-                )
-            else:
-                import io as _io
-                import zipfile as _zipfile
+        else:
+            import io as _io
+            import zipfile as _zipfile
 
-                zip_buf = _io.BytesIO()
-                with _zipfile.ZipFile(zip_buf, "w", _zipfile.ZIP_DEFLATED) as zf:
-                    for art in preprocessed:
-                        stem = art["filename"].rsplit(".", 1)[0]
-                        zf.writestr(f"{stem}.md", art["markdown"])
-                st.download_button(
-                    f"⬇ Download all ({len(preprocessed)} file(s), ZIP)",
-                    data=zip_buf.getvalue(),
-                    file_name=f"{st.session_state['submission_id']}_preprocessed.zip",
-                    mime="application/zip",
-                )
-                st.divider()
-
+            zip_buf = _io.BytesIO()
+            with _zipfile.ZipFile(zip_buf, "w", _zipfile.ZIP_DEFLATED) as zf:
                 for art in preprocessed:
-                    meta = art.get("metadata") or {}
-                    conf = art.get("confidence", 0.0) or 0.0
-                    quality = meta.get("ocr_quality", "?")
-                    ocr_pages = meta.get("ocr_pages", 0)
-                    pages = meta.get("page_count", "?")
-                    fb = art.get("fallback_attached", False)
-                    fb_label = "📎 fallback attached" if fb else "✓ text-only (Tier A)"
-                    header = (
-                        f"📄 **{art['filename']}** · {pages} page(s) · "
-                        f"OCR'd {ocr_pages} · quality {quality} · "
-                        f"conf {conf:.2f} · {fb_label}"
-                    )
-                    with st.expander(header, expanded=False):
-                        langs = ", ".join(meta.get("language_detected") or []) or "—"
-                        applied_rot = meta.get("applied_rotation_degrees", 0)
-                        md_size = len(art["markdown"].encode("utf-8"))
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            st.write(f"**Languages detected:** {langs}")
-                            st.write(f"**OCR used:** {'yes' if meta.get('ocr_used') else 'no'}")
-                            st.write(f"**Rotation applied:** {applied_rot}°")
-                        with c2:
-                            st.write(f"**Confidence:** {conf:.2f}")
-                            st.write(f"**Markdown size:** {md_size:,} bytes")
-                            st.write(f"**Tier:** {'B/C (fallback attached)' if fb else 'A (text only)'}")
+                    stem = art["filename"].rsplit(".", 1)[0]
+                    zf.writestr(f"{stem}.md", art["markdown"])
+            st.download_button(
+                f"⬇ Download all ({len(preprocessed)} file(s), ZIP)",
+                data=zip_buf.getvalue(),
+                file_name=f"{st.session_state['submission_id']}_preprocessed.zip",
+                mime="application/zip",
+            )
+            st.divider()
 
-                        stem = art["filename"].rsplit(".", 1)[0]
-                        st.download_button(
-                            f"⬇ Download {stem}.md",
-                            data=art["markdown"],
-                            file_name=f"{stem}.md",
-                            mime="text/markdown",
-                            key=f"dl_md_{stem}",
-                        )
-                        st.code(art["markdown"], language="markdown")
-
-        # ── Raw JSON tab ───────────────────────────────────────────────────────
-        with tabs[4]:
-            st.json(report)
-
-        # ── Conversation tab ───────────────────────────────────────────────────
-        with tabs[5]:
-            conv = st.session_state.get("conversation", {})
-            if not conv:
-                st.info("No conversation captured.")
-            else:
-                st.caption(f"Model: `{conv.get('model','')}`")
-                with st.expander("System prompt", expanded=False):
-                    st.code(conv.get("system", ""), language="markdown")
-                with st.expander("User message", expanded=True):
-                    st.json(conv.get("user_message", []))
-
-        # ── Response tab ───────────────────────────────────────────────────────
-        with tabs[6]:
-            conv = st.session_state.get("conversation", {})
-            raw_response = conv.get("assistant_response", "")
-            if not raw_response:
-                st.info("No response captured.")
-            else:
-                st.caption(f"{len(raw_response):,} characters")
-                st.download_button(
-                    "⬇ Download raw response",
-                    data=raw_response,
-                    file_name=f"{st.session_state['submission_id']}_response.json",
-                    mime="application/json",
+            for art in preprocessed:
+                meta = art.get("metadata") or {}
+                conf = art.get("confidence", 0.0) or 0.0
+                quality = meta.get("ocr_quality", "?")
+                ocr_pages = meta.get("ocr_pages", 0)
+                pages = meta.get("page_count", "?")
+                fb = art.get("fallback_attached", False)
+                fb_label = "📎 fallback attached" if fb else "✓ text-only (Tier A)"
+                header = (
+                    f"📄 **{art['filename']}** · {pages} page(s) · "
+                    f"OCR'd {ocr_pages} · quality {quality} · "
+                    f"conf {conf:.2f} · {fb_label}"
                 )
-                st.code(raw_response, language="json")
+                with st.expander(header, expanded=False):
+                    langs = ", ".join(meta.get("language_detected") or []) or "—"
+                    applied_rot = meta.get("applied_rotation_degrees", 0)
+                    md_size = len(art["markdown"].encode("utf-8"))
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.write(f"**Languages detected:** {langs}")
+                        st.write(f"**OCR used:** {'yes' if meta.get('ocr_used') else 'no'}")
+                        st.write(f"**Rotation applied:** {applied_rot}°")
+                    with c2:
+                        st.write(f"**Confidence:** {conf:.2f}")
+                        st.write(f"**Markdown size:** {md_size:,} bytes")
+                        st.write(f"**Tier:** {'B/C (fallback attached)' if fb else 'A (text only)'}")
+
+                    stem = art["filename"].rsplit(".", 1)[0]
+                    st.download_button(
+                        f"⬇ Download {stem}.md",
+                        data=art["markdown"],
+                        file_name=f"{stem}.md",
+                        mime="text/markdown",
+                        key=f"dl_md_{stem}",
+                    )
+                    st.code(art["markdown"], language="markdown")
+
+    # ── Raw JSON tab ───────────────────────────────────────────────────────────
+    with tabs[4]:
+        st.json(report)
+
+    # ── Conversation tab ───────────────────────────────────────────────────────
+    with tabs[5]:
+        conv = st.session_state.get("conversation", {})
+        if not conv:
+            st.info("No conversation captured.")
+        else:
+            st.caption(f"Model: `{conv.get('model','')}`")
+            with st.expander("System prompt", expanded=False):
+                st.code(conv.get("system", ""), language="markdown")
+            with st.expander("User message", expanded=True):
+                st.json(conv.get("user_message", []))
+
+    # ── Response tab ───────────────────────────────────────────────────────────
+    with tabs[6]:
+        conv = st.session_state.get("conversation", {})
+        raw_response = conv.get("assistant_response", "")
+        if not raw_response:
+            st.info("No response captured.")
+        else:
+            st.caption(f"{len(raw_response):,} characters")
+            st.download_button(
+                "⬇ Download raw response",
+                data=raw_response,
+                file_name=f"{st.session_state['submission_id']}_response.json",
+                mime="application/json",
+            )
+            st.code(raw_response, language="json")
 
 elif "conversation" in st.session_state:
     # Parse failed.
@@ -796,33 +729,27 @@ elif "conversation" in st.session_state:
     if elapsed is not None:
         st.caption(f"⏱ Elapsed: {elapsed:.1f}s")
 
-    if debug_mode:
-        # Diagnostic view: show conversation + raw response so we can debug.
-        tabs = st.tabs(["Conversation", "Response"])
-        with tabs[0]:
-            st.caption(f"Model: `{conv.get('model','')}`")
-            with st.expander("System prompt", expanded=False):
-                st.code(conv.get("system", ""), language="markdown")
-            with st.expander("User message", expanded=True):
-                st.json(conv.get("user_message", []))
-        with tabs[1]:
-            raw_response = conv.get("assistant_response", "")
-            if not raw_response:
-                st.warning("Model returned no text.")
-            else:
-                st.caption(f"{len(raw_response):,} characters")
-                st.download_button(
-                    "⬇ Download raw response",
-                    data=raw_response,
-                    file_name=f"{st.session_state.get('submission_id','response')}_response.txt",
-                    mime="text/plain",
-                )
-                st.code(raw_response, language="json")
-    else:
-        st.error(
-            "Couldn't parse the underwriting report. Please retry, or open this "
-            "page with `?debug=1` in the URL to see diagnostics."
-        )
+    st.error("Couldn't parse the underwriting report. Inspect the Conversation and Response tabs below for diagnostics, then retry.")
+    tabs = st.tabs(["Conversation", "Response"])
+    with tabs[0]:
+        st.caption(f"Model: `{conv.get('model','')}`")
+        with st.expander("System prompt", expanded=False):
+            st.code(conv.get("system", ""), language="markdown")
+        with st.expander("User message", expanded=True):
+            st.json(conv.get("user_message", []))
+    with tabs[1]:
+        raw_response = conv.get("assistant_response", "")
+        if not raw_response:
+            st.warning("Model returned no text.")
+        else:
+            st.caption(f"{len(raw_response):,} characters")
+            st.download_button(
+                "⬇ Download raw response",
+                data=raw_response,
+                file_name=f"{st.session_state.get('submission_id','response')}_response.txt",
+                mime="text/plain",
+            )
+            st.code(raw_response, language="json")
 
 else:
     st.info("Upload documents in the sidebar and click **Analyze** to begin.")

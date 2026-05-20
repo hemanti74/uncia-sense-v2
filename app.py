@@ -203,6 +203,15 @@ st.markdown(
 
 st.title("Uncia Sense — Document Intelligence")
 
+# Rotate the submission ID BEFORE the sidebar widget instantiates — Streamlit
+# disallows writing to a widget-owned key after the widget is created. This
+# block fires on the second pass triggered by the Analyze click below.
+if st.session_state.pop("_rotate_submission_id", False):
+    new_id = f"SUB-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')[:-3]}"
+    st.session_state["submission_id"] = new_id
+    st.session_state["submission_id_value"] = new_id
+    st.session_state["_run_analysis"] = True
+
 # ── Sidebar: upload + inputs ───────────────────────────────────────────────────
 with st.sidebar:
     st.header("Submission")
@@ -239,11 +248,10 @@ with st.sidebar:
     )
 
 # ── Analysis ───────────────────────────────────────────────────────────────────
-# First pass after the click: validate size, mint a fresh submission ID, drop all
-# stale results, and trigger a rerun. The rerun is what actually clears the main
-# area on screen — without it, the previous Packages/Documents/Unassigned panels
-# remain visible during the new analysis (Streamlit doesn't re-render the
-# section below the analyze block until the long-running call returns).
+# Click handler — first pass. Validate, drop stale results, then ask the next
+# rerun to rotate the submission ID and start the analysis. The rerun is what
+# actually clears the main area on screen; without it, the previous
+# Packages/Documents/Unassigned panels remain visible during the new analysis.
 if analyze_btn and uploaded_files:
     total_bytes = sum(f.size for f in uploaded_files)
     if total_bytes > MAX_TOTAL_UPLOAD_MB * 1024 * 1024:
@@ -255,15 +263,11 @@ if analyze_btn and uploaded_files:
 
     for key in ("report", "conversation", "cost"):
         st.session_state.pop(key, None)
-
-    submission_id = f"SUB-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')[:-3]}"
-    st.session_state["submission_id"] = submission_id
-    st.session_state["submission_id_value"] = submission_id
-    st.session_state["_run_analysis"] = True
+    st.session_state["_rotate_submission_id"] = True
     st.rerun()
 
-# Second pass: cleared state has propagated to the DOM, sidebar shows the new
-# submission ID. Now actually run the analysis.
+# Second pass: the top-of-script block above has already rotated the submission
+# ID and the sidebar reflects it. Now actually run the analysis.
 if st.session_state.pop("_run_analysis", False) and uploaded_files:
     submission_id = st.session_state["submission_id"]
     files = [(f.name, f.read()) for f in uploaded_files]

@@ -3,3 +3,8 @@ streamlit
 pandas
 openpyxl
 python-dotenv
+pymupdf
+pdfplumber
+pytesseract
+langdetect
+pillow

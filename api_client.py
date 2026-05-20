@@ -7,7 +7,7 @@ from typing import Callable, Optional
 import anthropic
 from dotenv import load_dotenv
 
-from file_handler import build_content_block
+from file_handler import build_content_blocks
 
 load_dotenv()
 
@@ -18,13 +18,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger("factoring_verification")
 
-_SYSTEM_PROMPT = Path(__file__).parent / "prompts" / "system_v2.txt"
+_PROMPTS_DIR = Path(__file__).parent / "prompts"
+PROMPT_VARIANTS: dict[str, dict] = {
+    "fast": {"file": "system_v2_fast.txt", "label": "Fast (default)"},
+    "full": {"file": "system_v2.txt",      "label": "Full (detailed)"},
+}
+DEFAULT_PROMPT_VARIANT = "fast"
 
 # Per-million-token pricing in USD. Cache read = 10% of input; cache write = 125% of input.
 MODEL_PRICING: dict[str, dict] = {
     "claude-opus-4-7":   {"label": "Opus 4.7 (most capable)",       "input": 5.0, "output": 25.0, "prefill": False},
     "claude-opus-4-6":   {"label": "Opus 4.6",                       "input": 5.0, "output": 25.0, "prefill": True},
-    "claude-sonnet-4-6": {"label": "Sonnet 4.6 (balanced)",          "input": 3.0, "output": 15.0, "prefill": True},
+    "claude-sonnet-4-6": {"label": "Sonnet 4.6 (balanced)",          "input": 3.0, "output": 15.0, "prefill": False},
     "claude-haiku-4-5":  {"label": "Haiku 4.5 (fastest, cheapest)",  "input": 1.0, "output": 5.0, "prefill": True},
 }
 
@@ -85,6 +90,15 @@ def _sanitize_blocks_for_display(blocks: list[dict]) -> list[dict]:
                     "data": f"<base64 omitted: {_human_size(len(data) * 3 // 4)}>",
                 },
             })
+        elif btype == "text":
+            text = b.get("text", "") or ""
+            if len(text) > 20_000:
+                out.append({
+                    "type": "text",
+                    "text": text[:20_000] + f"\n…\n<truncated for display: {len(text):,} chars total>",
+                })
+            else:
+                out.append(b)
         else:
             out.append(b)
     return out
@@ -132,24 +146,85 @@ def analyze_submission(
     notes: str = "",
     model: str = DEFAULT_MODEL,
     progress_cb: Optional[Callable[[str], None]] = None,
+    preprocess: bool = True,
+    stream_cb: Optional[Callable[[str], None]] = None,
+    response_language: str = "en",
+    prompt_variant: str = DEFAULT_PROMPT_VARIANT,
 ) -> tuple[str, Optional[dict], dict]:
     def report(msg: str) -> None:
         logger.info(msg)
         if progress_cb:
             progress_cb(msg)
 
-    report(f"Starting submission {submission_id} with {len(files)} file(s) · model={model}")
-    system_text = _SYSTEM_PROMPT.read_text(encoding="utf-8")
+    variant = prompt_variant if prompt_variant in PROMPT_VARIANTS else DEFAULT_PROMPT_VARIANT
+    report(
+        f"Starting submission {submission_id} with {len(files)} file(s) · "
+        f"model={model} · prompt={variant} · "
+        f"preprocess={'on' if preprocess else 'off'} · "
+        f"response_lang={(response_language or 'en').lower()}"
+    )
+
+    if preprocess:
+        from pdf_processor import get_tesseract_status
+
+        status = get_tesseract_status()
+        if status["available"]:
+            ver = f" v{status['version']}" if status["version"] else ""
+            report(f"Tesseract OCR: ✓ available{ver} ({status['path']})")
+        else:
+            report(
+                "Tesseract OCR: ✗ not installed — scanned/photo files will be sent "
+                "as base64 to Claude (vision fallback). Install UB Mannheim build "
+                "and add eng+spa packs, or set $env:TESSERACT_CMD."
+            )
+
+    system_text = (_PROMPTS_DIR / PROMPT_VARIANTS[variant]["file"]).read_text(encoding="utf-8")
     client = anthropic.Anthropic()
 
     content_blocks = []
+    preprocessed_artifacts: list[dict] = []
     for idx, (name, data) in enumerate(files, 1):
         ext = Path(name).suffix.lower()
         size = _human_size(len(data))
         report(f"[{idx}/{len(files)}] Processing {name} ({ext}, {size})")
-        content_blocks.append(build_content_block(name, data))
+        blocks, extracted = build_content_blocks(
+            name, data, preprocess=preprocess, progress_cb=report
+        )
+        content_blocks.extend(blocks)
+        if extracted is not None:
+            preprocessed_artifacts.append({
+                "filename": extracted.filename,
+                "kind": extracted.kind,
+                "markdown": extracted.markdown,
+                "metadata": extracted.metadata,
+                "confidence": extracted.confidence,
+                "fallback_attached": extracted.fallback_needed,
+            })
 
     note_line = f"Submission notes: {notes}\n" if notes.strip() else ""
+
+    lang = (response_language or "en").lower()
+    if lang == "es":
+        language_directive = (
+            "\n\nOutput language: SPANISH. Write all human-readable free-text fields "
+            "(underwriter_summary, every description, doc_notes, every note, every "
+            "reason, every disposition, matching_issues) in Spanish. JSON keys and "
+            "enum values MUST remain in English exactly as specified in the schema — "
+            "this includes recommendation values (APPROVE / APPROVE_WITH_NOTE / "
+            "REVIEW / DECLINE / INSUFFICIENT_DOCS), severity (LOW / MEDIUM / HIGH / "
+            "CRITICAL), direction (FAVORABLE / NEUTRAL / ADVERSE), match-matrix "
+            "status (MATCH / VARIANCE / FAIL / NOT_APPLICABLE), content_orientation, "
+            "ocr_quality, and all schema field names. Preserve party names, "
+            "addresses, and product descriptions verbatim in their original document "
+            "language."
+        )
+    else:
+        language_directive = (
+            "\n\nOutput language: ENGLISH. Write all human-readable free-text fields "
+            "in English. Preserve party names, addresses, and product descriptions "
+            "verbatim in their original document language."
+        )
+
     content_blocks.append(
         {
             "type": "text",
@@ -160,6 +235,7 @@ def analyze_submission(
                 "underwriting report per your system instructions. The submission may "
                 "contain one or multiple receivables — identify each independently and "
                 "group supporting documents accordingly."
+                f"{language_directive}"
             ),
         }
     )
@@ -172,7 +248,13 @@ def analyze_submission(
     report(f"Sending {len(content_blocks) - 1} document(s) for analysis (streaming)…")
     text_parts: list[str] = []
     chars = 0
-    last_tick = time.monotonic()
+    # Spinner ticks every 5 s; init to 0.0 so the first chunk fires it immediately.
+    SPINNER_INTERVAL_S = 5.0
+    last_tick = 0.0
+    last_stream_tick = 0.0
+    prefix = "{" if use_prefill else ""
+    spinner_frames = ("|", "/", "-", "\\")
+    spinner_idx = 0
     with client.messages.stream(
         model=model,
         max_tokens=50000,
@@ -189,9 +271,15 @@ def analyze_submission(
             text_parts.append(text)
             chars += len(text)
             now = time.monotonic()
-            if now - last_tick >= 1.0:
-                report(f"Streaming response… {chars:,} chars")
+            if now - last_tick >= SPINNER_INTERVAL_S:
+                report(f"Awaiting response {spinner_frames[spinner_idx % 4]}")
+                spinner_idx += 1
                 last_tick = now
+            if stream_cb and now - last_stream_tick >= 0.2:
+                stream_cb(prefix + "".join(text_parts))
+                last_stream_tick = now
+        if stream_cb:
+            stream_cb(prefix + "".join(text_parts))
         final_message = stream.get_final_message()
 
     usage = getattr(final_message, "usage", None)
@@ -214,6 +302,7 @@ def analyze_submission(
         "system": system_text,
         "user_message": _sanitize_blocks_for_display(content_blocks),
         "assistant_response": raw,
+        "preprocessed_documents": preprocessed_artifacts,
     }
     return raw, cost, conversation
 

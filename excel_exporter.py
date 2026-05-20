@@ -1,7 +1,65 @@
+import csv
 import io
 from typing import Any
 
 import pandas as pd
+
+FACTORSQL_COLUMNS = [
+    "ACCT_ID", "ACCT_SUB", "BAL_ASSIGN", "DTR_NAME",
+    "DUE_DATE", "INV_DATE", "INV_ID", "PO_NO", "REL_ID",
+]
+
+
+def _bal_assign(value) -> str:
+    if value is None or value == "":
+        return ""
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def generate_factorsql_csv(report: dict) -> bytes:
+    """Build the FactorSQL upload CSV.
+
+    One row per receivable (package). ACCT_ID, ACCT_SUB, and REL_ID are always
+    blank (filled in downstream by FactorSQL). BAL_ASSIGN is the RECEIVABLE
+    BALANCE — `amount_due` (total_amount minus any prepayment/deposit shown on
+    the invoice), NOT the gross invoice total. All other fields come from the
+    package's primary invoice.
+
+    Output is UTF-8 with BOM so Excel opens it with the correct encoding for
+    accented characters (Spanish party names, Mexican RFCs, etc.).
+    """
+    packages = report.get("packages", []) or []
+
+    buf = io.StringIO(newline="")
+    writer = csv.writer(buf, quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
+    writer.writerow(FACTORSQL_COLUMNS)
+
+    for pkg in packages:
+        inv = pkg.get("primary_invoice") or {}
+        buyer = inv.get("buyer") or {}
+
+        # Receivable balance = amount_due. Fall back to total_amount only if
+        # the model omitted amount_due entirely (older response format).
+        balance = inv.get("amount_due")
+        if balance is None:
+            balance = inv.get("total_amount")
+
+        writer.writerow([
+            "",                                          # ACCT_ID
+            "",                                          # ACCT_SUB
+            _bal_assign(balance),                        # BAL_ASSIGN (amount_due)
+            buyer.get("name") or "",                      # DTR_NAME
+            inv.get("due_date") or "",                    # DUE_DATE
+            inv.get("invoice_date") or "",                # INV_DATE
+            inv.get("invoice_number") or "",              # INV_ID
+            inv.get("po_reference") or "",                # PO_NO
+            "",                                          # REL_ID
+        ])
+
+    return ("﻿" + buf.getvalue()).encode("utf-8")
 
 
 def _fmt_currency(amount, currency) -> str:
@@ -80,6 +138,8 @@ def generate_excel(report: dict) -> bytes:
                 "Total Amount": inv.get("total_amount", ""),
                 "Subtotal": inv.get("subtotal", ""),
                 "Tax Amount": inv.get("tax_amount", ""),
+                "Prepayment Amount": inv.get("prepayment_amount", ""),
+                "Amount Due (Receivable Balance)": inv.get("amount_due", ""),
                 "Seller Name": seller.get("name", ""),
                 "Seller Country": seller.get("country", ""),
                 "Seller Tax ID": seller.get("tax_id", ""),

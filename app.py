@@ -235,7 +235,7 @@ with st.sidebar:
         "Analyze",
         type="primary",
         disabled=not uploaded_files,
-        use_container_width=True,
+        width="stretch",
     )
 
 # ── Analysis ───────────────────────────────────────────────────────────────────
@@ -376,7 +376,7 @@ if "report" in st.session_state:
                 "left blank for FactorSQL to fill in."
             ),
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
     with dl2:
         st.download_button(
@@ -386,7 +386,7 @@ if "report" in st.session_state:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             help="Multi-sheet underwriting analysis: summary, documents, packages, discrepancies, red flags, match matrix, missing docs, unassigned.",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
 
     st.divider()
@@ -506,7 +506,7 @@ if "report" in st.session_state:
                             }
                             for m in matrix
                         ]
-                        st.dataframe(pd.DataFrame(matrix_data), use_container_width=True)
+                        st.dataframe(pd.DataFrame(matrix_data), width="stretch")
 
                 matching_issues = pkg.get("matching_issues") or []
                 if matching_issues:

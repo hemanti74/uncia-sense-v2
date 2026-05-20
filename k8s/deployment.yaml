@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uncia-sense
+  labels:
+    app: uncia-sense
+spec:
+  # Stay at 1 replica. Streamlit's `st.session_state` is per-process; scaling
+  # beyond 1 requires sticky sessions AND careful WebSocket handling (see
+  # Ingress annotations). Bump only after verifying that flow end-to-end.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: uncia-sense
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: uncia-sense
+    spec:
+      containers:
+      - name: app
+        # Replace ACCOUNT_ID / REGION / TAG before applying.
+        image: ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/uncia-sense:v1
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8501
+          protocol: TCP
+        envFrom:
+        - secretRef:
+            name: uncia-sense-secrets
+        resources:
+          # Memory limit ≳ 3× MAX_TOTAL_UPLOAD_MB from config.py: PIL/PyMuPDF
+          # can hold the original bytes + a rendered raster + OCR data in
+          # parallel during preprocessing.
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "1500m"
+            memory: "1Gi"
+        readinessProbe:
+          httpGet:
+            path: /_stcore/health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /_stcore/health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 1000
+          readOnlyRootFilesystem: false   # Streamlit + Tesseract need /tmp writable
+          capabilities:
+            drop: ["ALL"]
+      terminationGracePeriodSeconds: 30

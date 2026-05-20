@@ -1,0 +1,15 @@
+# Pre-commit hooks. After cloning the repo, every developer runs:
+#
+#     pip install pre-commit
+#     pre-commit install
+#
+# After that, `git commit` invokes the hooks below against the staged diff.
+# A detection aborts the commit; the developer can fix and try again.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      # Scans staged changes for AWS keys, Anthropic / DeepSeek API keys,
+      # generic high-entropy strings, JWTs, GitHub tokens, etc. Out-of-the-box
+      # rule set covers the providers we use; no custom config needed.
+      - id: gitleaks

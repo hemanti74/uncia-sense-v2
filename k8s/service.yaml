@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: uncia-sense
+  labels:
+    app: uncia-sense
+spec:
+  type: ClusterIP
+  selector:
+    app: uncia-sense
+  ports:
+  - name: http
+    port: 80
+    targetPort: http     # named port from the Deployment (8501)
+    protocol: TCP

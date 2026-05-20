@@ -1,0 +1,44 @@
+# Build hygiene — keep the image lean and never leak local secrets/state.
+.venv/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local dev state
+.git/
+.gitignore
+.gitattributes
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local Streamlit config that might contain dev-only overrides or secrets
+.streamlit/secrets.toml
+
+# Local .env files — secrets must come from K8s Secrets, not the image
+.env
+.env.*
+!.env.example
+
+# Build / package artifacts
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Documentation / runbooks not needed at runtime
+DEPLOY.md
+README.md
+factoring_verification_prompt_v2.md
+k8s/
+
+# Tests / scratch — none currently, but reserve the names
+tests/
+scratch/
+*.test.py

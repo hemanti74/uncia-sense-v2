@@ -6,6 +6,22 @@ env/
 .env.*
 !.env.example
 
+# Secret manifests — only the .example.yaml template is committed.
+k8s/secret.yaml
+k8s/*.secret.yaml
+
+# AWS / cloud CLI state that occasionally holds creds
+.aws/
+.aws-sam/
+
+# Anything ending in -secret(s) at any depth
+**/*-secret
+**/*-secrets
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+
 # Python
 __pycache__/
 *.py[cod]

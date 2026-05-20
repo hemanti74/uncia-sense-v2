@@ -173,10 +173,9 @@ For each receivable, extract every canonical field present. Use null when absent
 - Dates → ISO 8601 (YYYY-MM-DD).
 - Currency → ISO 4217 (USD, EUR, MXN, CRC, INR, PAB).
 - Country → ISO 3166-1 alpha-2.
-- Party names → preserve as written; produce `normalized_name` (uppercase, trimmed, legal-suffix-stripped) for matching.
+- Party names → preserve as written.
 - HS codes → 6 or 10 digit numeric string.
 - Incoterms → Incoterms 2020 three-letter code.
-- Tax IDs → preserve format (RFC for MX, EIN/SSN for US, RUC for some LatAm, GSTIN for IN, etc.) and tag with country in `tax_id_country`.
 
 # RECEIVABLE BALANCE EXTRACTION — CRITICAL FOR FACTORING
 The factor buys the RECEIVABLE BALANCE — the amount the buyer still owes — NOT the gross invoice total. If the buyer has already prepaid a portion (deposit, advance, down payment, partial payment shown on the invoice), the factor must finance only the remaining balance. Extract three amount fields per invoice:
@@ -249,7 +248,6 @@ Per receivable, set `recommendation` to APPROVE / APPROVE_WITH_NOTE / REVIEW / D
   "submission_summary": {
     "total_documents": 0,
     "total_receivables_identified": 0,
-    "primary_languages": ["en", "es"],
     "orientation_issues_found": 0,
     "submission_recommendation": "APPROVE | APPROVE_WITH_NOTE | REVIEW | DECLINE | INSUFFICIENT_DOCS",
     "total_advance_eligible_amount": 0.00,
@@ -282,22 +280,18 @@ Per receivable, set `recommendation` to APPROVE / APPROVE_WITH_NOTE / REVIEW / D
         "due_date": "YYYY-MM-DD",
         "currency": "USD",
         "total_amount": 0.00,
-        "subtotal": 0.00,
-        "tax_amount": 0.00,
         "prepayment_amount": 0.00,
         "amount_due": 0.00,
-        "seller": { "name": "...", "normalized_name": "...", "address": "...", "country": "ISO-2", "tax_id": "...", "tax_id_country": "ISO-2" },
-        "buyer": { "name": "...", "normalized_name": "...", "address": "...", "country": "ISO-2", "tax_id": "...", "tax_id_country": "ISO-2" },
-        "po_reference": "...",
-        "line_po_reference": "<if applicable>",
-        "line_items": [ { "description": "...", "quantity": 0, "unit": "...", "unit_price": 0.00, "amount": 0.00, "hs_code": "...", "sat_product_code": "..." } ]
+        "seller": { "name": "..." },
+        "buyer": { "name": "..." },
+        "po_reference": "..."
       },
       "supporting_docs_matched": [
         { "filename": "...", "doc_type": "...", "matched_by": "invoice_number | uuid | po_number | line_po | amount_and_party", "match_confidence": 0.00 }
       ],
       "matching_issues": [ "..." ],
       "match_matrix": [
-        { "field": "...", "invoice_value": "...", "values_by_doc": { "...filename...": "..." }, "confidence": 0.00, "status": "MATCH | VARIANCE | FAIL | NOT_APPLICABLE", "note": "..." }
+        { "field": "...", "invoice_value": "...", "confidence": 0.00, "status": "MATCH | VARIANCE | FAIL | NOT_APPLICABLE", "note": "..." }
       ],
       "discrepancies": [ { "id": 1, "field": "...", "description": "...", "direction": "FAVORABLE | NEUTRAL | ADVERSE", "severity": "LOW | MEDIUM | HIGH | CRITICAL", "disposition": "..." } ],
       "red_flags": [ { "rule_id": 1, "description": "...", "severity": "LOW | MEDIUM | HIGH | CRITICAL" } ],

@@ -78,7 +78,6 @@ Submission-level `submission_recommendation` = WORST of all per-receivable recom
 # CONSTRAINTS
 - Return ONLY the JSON object below. No prose, no preamble, no markdown fences.
 - `match_matrix`: populate per the CROSS-DOCUMENT MATCHING section — only core fields (invoice_number, total_amount, amount_due, buyer_name, seller_name, po_number, due_date) and only when the receivable has 2+ docs. Otherwise `[]`.
-- Set `line_items: []` unless the invoice has fewer than 5 items and you can extract them cleanly.
 - `assignment_schedule` is not required; leave it out.
 - `underwriter_summary`: ONE sentence, max ~30 words.
 - `advance_eligible_amount` = min(amount_due, PO_amount if known, NoA_amount if known). If any HIGH/CRITICAL adverse flag, set to 0.
@@ -94,7 +93,6 @@ Submission-level `submission_recommendation` = WORST of all per-receivable recom
   "submission_summary": {
     "total_documents": 0,
     "total_receivables_identified": 0,
-    "primary_languages": ["en"],
     "orientation_issues_found": 0,
     "submission_recommendation": "APPROVE | APPROVE_WITH_NOTE | REVIEW | DECLINE | INSUFFICIENT_DOCS",
     "total_advance_eligible_amount": 0.00,
@@ -127,22 +125,18 @@ Submission-level `submission_recommendation` = WORST of all per-receivable recom
         "due_date": "YYYY-MM-DD",
         "currency": "USD",
         "total_amount": 0.00,
-        "subtotal": null,
-        "tax_amount": null,
         "prepayment_amount": 0.00,
         "amount_due": 0.00,
-        "seller": { "name": "...", "country": "ISO-2", "tax_id": null },
-        "buyer": { "name": "...", "country": "ISO-2", "tax_id": null },
-        "po_reference": "...",
-        "line_po_reference": null,
-        "line_items": []
+        "seller": { "name": "..." },
+        "buyer": { "name": "..." },
+        "po_reference": "..."
       },
       "supporting_docs_matched": [
         { "filename": "...", "doc_type": "...", "matched_by": "invoice_number | uuid | po_number | line_po | amount_and_party", "match_confidence": 0.0 }
       ],
       "matching_issues": [],
       "match_matrix": [
-        { "field": "invoice_number", "invoice_value": "...", "values_by_doc": { "<filename>": "..." }, "confidence": 1.0, "status": "MATCH | VARIANCE | FAIL | NOT_APPLICABLE", "note": null }
+        { "field": "invoice_number", "invoice_value": "...", "confidence": 1.0, "status": "MATCH | VARIANCE | FAIL | NOT_APPLICABLE", "note": null }
       ],
       "discrepancies": [
         { "id": 1, "field": "...", "description": "...", "direction": "FAVORABLE | NEUTRAL | ADVERSE", "severity": "LOW | MEDIUM | HIGH | CRITICAL", "disposition": null }

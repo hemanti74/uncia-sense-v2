@@ -84,7 +84,6 @@ def generate_excel(report: dict) -> bytes:
         {"Field": "Model Version", "Value": report.get("model_version", "")},
         {"Field": "Total Documents", "Value": summary.get("total_documents", "")},
         {"Field": "Total Receivables", "Value": summary.get("total_receivables_identified", "")},
-        {"Field": "Primary Languages", "Value": ", ".join(summary.get("primary_languages", []))},
         {"Field": "Orientation Issues", "Value": summary.get("orientation_issues_found", 0)},
         {"Field": "Submission Recommendation", "Value": summary.get("submission_recommendation", "")},
         {
@@ -136,18 +135,11 @@ def generate_excel(report: dict) -> bytes:
                 "Due Date": inv.get("due_date", ""),
                 "Currency": inv.get("currency", ""),
                 "Total Amount": inv.get("total_amount", ""),
-                "Subtotal": inv.get("subtotal", ""),
-                "Tax Amount": inv.get("tax_amount", ""),
                 "Prepayment Amount": inv.get("prepayment_amount", ""),
                 "Amount Due (Receivable Balance)": inv.get("amount_due", ""),
                 "Seller Name": seller.get("name", ""),
-                "Seller Country": seller.get("country", ""),
-                "Seller Tax ID": seller.get("tax_id", ""),
                 "Buyer Name": buyer.get("name", ""),
-                "Buyer Country": buyer.get("country", ""),
-                "Buyer Tax ID": buyer.get("tax_id", ""),
                 "PO Reference": inv.get("po_reference", ""),
-                "Line PO Reference": inv.get("line_po_reference", ""),
                 "Overall Confidence": pkg.get("overall_confidence", ""),
                 "Recommendation": pkg.get("recommendation", ""),
                 "Advance Eligible Amount": pkg.get("advance_eligible_amount", ""),
@@ -201,21 +193,19 @@ def generate_excel(report: dict) -> bytes:
     for pkg in packages:
         inv_num = (pkg.get("primary_invoice") or {}).get("invoice_number", "")
         for m in pkg.get("match_matrix") or []:
-            values_by_doc = m.get("values_by_doc") or {}
             matrix_rows.append(
                 {
                     "Receivable Index": pkg.get("receivable_index", ""),
                     "Invoice Number": inv_num,
                     "Field": m.get("field", ""),
                     "Invoice Value": m.get("invoice_value", ""),
-                    "Values by Doc": "; ".join(f"{k}: {v}" for k, v in values_by_doc.items()),
                     "Confidence": m.get("confidence", ""),
                     "Status": m.get("status", ""),
                     "Note": m.get("note", ""),
                 }
             )
     df_matrix = pd.DataFrame(matrix_rows) if matrix_rows else pd.DataFrame(
-        columns=["Receivable Index", "Invoice Number", "Field", "Invoice Value", "Values by Doc", "Confidence", "Status", "Note"]
+        columns=["Receivable Index", "Invoice Number", "Field", "Invoice Value", "Confidence", "Status", "Note"]
     )
 
     # ── Missing Documents sheet ────────────────────────────────────────────────

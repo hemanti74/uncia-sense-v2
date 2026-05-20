@@ -316,6 +316,8 @@ if analyze_btn and uploaded_files:
         # None if the message shouldn't change the label.
         def _demo_label(msg: str) -> "str | None":
             s = msg.strip()
+            if s.startswith("Claude API busy") or s.startswith("DeepSeek API busy"):
+                return "Model is busy — retrying…"
             if s.startswith(STREAM_PREFIX):
                 # Preserve the rotating spinner char appended by api_client.
                 spinner_char = s[len(STREAM_PREFIX):].strip()
@@ -409,7 +411,19 @@ if analyze_btn and uploaded_files:
                 )
         except Exception as e:
             on_progress(f"ERROR: {e}")
-            status.update(label=f"Failed: {e}", state="error")
+            # Friendlier label for demo mode on common transient errors.
+            err_text = str(e).lower()
+            if "overloaded" in err_text:
+                friendly = "Claude is overloaded — please try again in a minute."
+            elif "rate_limit" in err_text or "rate limit" in err_text:
+                friendly = "Rate limited by Claude — please wait a moment and retry."
+            elif "timeout" in err_text or "connection" in err_text:
+                friendly = "Network/timeout error contacting Claude — please retry."
+            else:
+                friendly = f"Failed: {e}" if debug_mode else "Analysis failed — please retry."
+            status.update(label=friendly, state="error")
+            if not debug_mode:
+                st.error(friendly)
             st.stop()
 
 # ── Results ────────────────────────────────────────────────────────────────────

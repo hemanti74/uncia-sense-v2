@@ -1,6 +1,6 @@
 # Uncia Sense — Invoice Factoring Verification
 
-A Streamlit application that uses Claude (`claude-opus-4-7`) to analyze invoice factoring submission packages and produce two outputs:
+A Streamlit application that uses Anthropic Claude or DeepSeek (debug-mode selectable) to analyze invoice factoring submission packages and produce two outputs:
 
 1. **FactorSQL upload (CSV)** — one row per receivable in FactorSQL's expected column order, ready to import.
 2. **Underwriting analysis (Excel)** — multi-sheet workbook with documents, packages, discrepancies, red flags, match matrix, missing docs, and unassigned items.
@@ -12,7 +12,8 @@ The system handles **PDF, XML (CFDI), JPG, and PNG** documents in **English, Spa
 ## Prerequisites
 
 - **Python 3.10+** (tested on 3.14)
-- **Anthropic API key** — get one at https://console.anthropic.com/
+- **Anthropic API key** — get one at <https://console.anthropic.com/>
+- **DeepSeek API key** (optional, debug mode only) — get one at <https://platform.deepseek.com/>
 - **Tesseract OCR** (recommended, Windows) — needed only for scanned PDFs and phone-photo images. Born-digital PDFs work without it.
 
 ---
@@ -35,9 +36,9 @@ pip install -r requirements.txt
 
 Installs: `anthropic`, `streamlit`, `pandas`, `openpyxl`, `python-dotenv`, `pymupdf`, `pdfplumber`, `pytesseract`, `langdetect`, `pillow`.
 
-### 3. Configure your API key
+### 3. Configure your API keys
 
-Copy the example env file and fill in your key:
+Copy the example env file and fill in your keys:
 
 ```powershell
 Copy-Item .env.example .env
@@ -45,9 +46,12 @@ Copy-Item .env.example .env
 
 Edit `.env`:
 
-```
+```ini
 ANTHROPIC_API_KEY=sk-ant-...
+DEEPSEEK_API_KEY=sk-...   # optional — only needed if you select a DeepSeek model in debug mode
 ```
+
+`ANTHROPIC_API_KEY` is required (demo mode uses Claude Opus 4.7). `DEEPSEEK_API_KEY` is only consulted when a DeepSeek model is selected from the debug-mode model dropdown.
 
 ### 4. (Recommended) Install Tesseract OCR
 
@@ -139,8 +143,10 @@ Eight sheets:
 Append `?debug=1` (or `?debug=true`, `?debug=yes`, `?debug=on`) to the URL. Debug mode unlocks:
 
 - **Sidebar additions:**
-  - **Model selector** — choose between Opus 4.7, Opus 4.6, Sonnet 4.6, Haiku 4.5 (default Opus 4.7)
-  - **Local preprocessing** toggle — disable to A/B-compare against the pure-vision pipeline
+  - **Model selector** — options across two providers (default Opus 4.7):
+    - Anthropic: Opus 4.7, Opus 4.6, Sonnet 4.6, Haiku 4.5
+    - DeepSeek: V4 Flash (`deepseek-v4-flash`), V4 Pro (`deepseek-v4-pro`), and the deprecated V3 (`deepseek-chat`) and R1 (`deepseek-reasoner`) aliases
+  - **Local preprocessing** toggle — disable to A/B-compare against the pure-vision pipeline (Anthropic only; DeepSeek is text-only and ignores the toggle)
   - **Prompt selector** — Fast (default, ~2,400 tokens, ~30–60 s typical) or Full (~6,100 tokens, ~90–120 s+ typical)
 - **Live response stream** — scrollable 400 px box that shows Claude's response building token-by-token, refreshed ~5× per second
 - **Verbose progress log** — per-file preprocessing milestones (`page 2/4: Tesseract OCR running (eng+spa)…`, `Tesseract OCR'd 2/5 page(s) · confidence=0.91`), Tesseract availability banner, cost line
@@ -171,6 +177,32 @@ Both produce the same JSON shape, so downloads, tabs, and the Excel report work 
 
 ---
 
+## Providers — Anthropic vs DeepSeek
+
+The model dropdown (debug mode) routes to one of two providers automatically. The JSON output schema is identical; only the API mechanics differ.
+
+### Anthropic (Claude) — full vision
+
+- Models: Opus 4.7 (default), Opus 4.6, Sonnet 4.6, Haiku 4.5
+- Pricing per 1M tokens (input / output): Opus $5 / $25, Sonnet $3 / $15, Haiku $1 / $5
+- Vision: full — original PDFs and images are attached as fallback when local extraction confidence < 0.85
+- Max output: 50,000 tokens
+- Prompt caching: `cache_control: ephemeral` on the system prompt
+
+### DeepSeek — text-only, much cheaper
+
+- Models: V4 Flash (`deepseek-v4-flash`), V4 Pro (`deepseek-v4-pro`); the legacy `deepseek-chat` (V3) and `deepseek-reasoner` (R1) IDs still work but are deprecated by DeepSeek (they now alias the non-thinking and thinking modes of V4 Flash).
+- Pricing per 1M tokens (input cache-miss / cache-hit / output): V4 Flash $0.14 / $0.0028 / $0.28; V4 Pro $0.435 / $0.003625 / $0.87 (75%-off promo through 2026/05/31 — 4× higher after expiry); legacy V3 $0.27 / $0.07 / $1.10; legacy R1 $0.55 / $0.14 / $2.19. Roughly **~10–40× cheaper than Claude Opus**.
+- **Vision: not supported.** DeepSeek receives only the preprocessed Markdown. If a document is Tier B/C (low extraction confidence with a vision fallback), the fallback PDF/image is replaced with an inline note saying it can't be viewed. **Best with born-digital PDFs and clean scans** where Tier A coverage is high.
+- Max output: 8,000 tokens. Multi-invoice packages with 8+ receivables may truncate — keep submissions under ~6–7 receivables when using DeepSeek, or switch to Anthropic.
+- Prompt caching: automatic (DeepSeek-side context cache); cache-hit tokens are billed at the lower rate.
+- Output mode: `response_format={"type": "json_object"}` to enforce JSON-only output.
+- Uses the OpenAI Python SDK pointed at `https://api.deepseek.com`.
+
+When a DeepSeek model is selected, the up-front status log (debug mode) shows `model=deepseek-chat (deepseek)` so you know which provider is being called. Retry logic with 5/15/30 s backoff applies to both providers.
+
+---
+
 ## Project structure
 
 ```
@@ -192,8 +224,9 @@ Both produce the same JSON shape, so downloads, tabs, and the Excel report work 
 
 ## Implementation notes
 
-- **Prompt caching**: each variant's system prompt is cached via `cache_control: ephemeral`, reducing cost on repeat submissions. Switching variants is a one-time cache miss.
-- **Model**: default `claude-opus-4-7`. `temperature` is intentionally omitted (removed on Opus 4.7). Sonnet 4.6 does not support assistant message prefill — handled automatically per-model.
+- **Prompt caching**: Anthropic — each variant's system prompt is cached via `cache_control: ephemeral`. DeepSeek — automatic provider-side context cache; cache-hit tokens are billed at a discounted rate. Switching variants or providers is a one-time cache miss.
+- **Model**: default `claude-opus-4-7`. `temperature` is intentionally omitted (removed on Opus 4.7). Sonnet 4.6 does not support assistant message prefill — handled automatically per-model. DeepSeek selection requires `DEEPSEEK_API_KEY` in `.env`; missing key fails the request with a clear error.
+- **DeepSeek vs Anthropic**: same prompt, same JSON schema. DeepSeek is text-only — vision-fallback document/image blocks are replaced with an inline note so DeepSeek won't see the original. For best DeepSeek results, ensure local preprocessing is on (default) and Tesseract is installed for scanned docs.
 - **Local preprocessing** (default on): PDFs and images are extracted to Markdown locally with PyMuPDF (and Tesseract for scans), sent as a text block prefaced with a ```json metadata header (filename, page count, language detected, OCR quality, rotation applied, extraction confidence, fallback flag). The original file is attached as a vision fallback only when extraction confidence < 0.85 or the source is a phone photo. Disable from the debug sidebar to A/B-compare against the pure-vision pipeline.
 - **XML files**: always pass through inline as text with a `=== FILE: <name> ===` marker (CFDI XML is the legal source of truth — no preprocessing needed).
 - **Receivable balance**: factoring critical. The prompt extracts `total_amount` (gross), `prepayment_amount` (deposits/advances shown on the invoice), and `amount_due = total_amount − prepayment_amount`. `BAL_ASSIGN` in the FactorSQL CSV and `advance_eligible_amount` in the JSON both use `amount_due`, not `total_amount`.
